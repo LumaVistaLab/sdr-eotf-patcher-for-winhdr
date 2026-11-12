@@ -6,6 +6,8 @@ Select the decoding curve for SDR content on Windows HDR / Dolby Vision outputs:
 
 The patcher isolates processing by display rendering context and replaces only the SDR shaders used by the selected HDR output. Other SDR displays keep their original processing path. System DLL files, drivers, and ICC configurations remain unchanged.
 
+Release notes: [English / 简体中文](RELEASE_NOTES.md).
+
 ## Compatibility
 
 - Windows x64 with HDR / Dolby Vision enabled on the target display.
@@ -114,7 +116,7 @@ To compile and run all checks:
 
 The five check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, and the native information-box lifecycle. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
 
-Unpacked build output is placed in `build/package/`. Delivery files are `dist/SdrEotfPatcher-portable.zip` and its adjacent `.sha256` file. A fixed manifest packages the executable, one matching helper DLL, the filename record, the recovery script, both English and Simplified Chinese documentation, and license notices. Test executables, diagnostic reports, symbol caches, and linker output are excluded.
+Unpacked build output is placed in `build/package/`. Delivery files are `dist/SdrEotfPatcher-portable.zip` and its adjacent `.sha256` file. A fixed manifest packages the executable, one matching helper DLL, the filename record, the recovery script, both English and Simplified Chinese documentation, bilingual release notes, and license notices. Test executables, diagnostic reports, symbol caches, and linker output are excluded.
 
 After building, a read-only inspection can be run with:
 
@@ -128,6 +130,7 @@ After building, a read-only inspection can be run with:
 | --- | --- |
 | `README.md` | English project documentation |
 | `README_zh-CN.md` | Simplified Chinese project documentation |
+| `RELEASE_NOTES.md` | Bilingual release notes |
 | `LICENSE` | Full GNU GPL v3 license text |
 | `build.ps1` | Build, checks, and packaging entry point |
 | `Restore-Display.ps1` | Reapply the display configuration saved by Windows |
