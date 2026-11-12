@@ -69,11 +69,11 @@ if ($Test) {
     }
 }
 [IO.File]::WriteAllText((Join-Path $package 'agent-file.txt'), $agentFile + "`r`n", [Text.Encoding]::ASCII)
-Copy-Item -LiteralPath README.md,LICENSE,Restore-Display.ps1 -Destination $package -Force
+Copy-Item -LiteralPath README.md,README_zh-CN.md,LICENSE,Restore-Display.ps1 -Destination $package -Force
 Copy-Item -LiteralPath src\third_party\THIRD_PARTY_NOTICES,src\third_party\dwm_eotf_rs-LICENSE -Destination $package -Force
 Copy-Item -LiteralPath src\third_party\minhook\LICENSE.txt -Destination (Join-Path $package 'MinHook-LICENSE.txt') -Force
 # Package an explicit manifest so diagnostics, tests, symbols and old agents cannot enter the archive.
-$packageFiles = @('SdrEotfPatcher.exe', $agentFile, 'agent-file.txt', 'README.md', 'LICENSE', 'Restore-Display.ps1', 'THIRD_PARTY_NOTICES', 'dwm_eotf_rs-LICENSE', 'MinHook-LICENSE.txt')
+$packageFiles = @('SdrEotfPatcher.exe', $agentFile, 'agent-file.txt', 'README.md', 'README_zh-CN.md', 'LICENSE', 'Restore-Display.ps1', 'THIRD_PARTY_NOTICES', 'dwm_eotf_rs-LICENSE', 'MinHook-LICENSE.txt')
 $packagePaths = @($packageFiles | ForEach-Object { Join-Path $package $_ })
 $archive = Join-Path $PSScriptRoot 'dist\SdrEotfPatcher-portable.zip'
 $stagedArchive = Join-Path $PSScriptRoot 'build\SdrEotfPatcher-portable.zip'
