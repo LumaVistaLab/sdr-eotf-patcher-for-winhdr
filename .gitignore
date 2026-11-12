@@ -1,0 +1,7 @@
+build/
+dist/
+
+sdr-eotf-patcher-for-winhdr.code-workspace
+
+__pycache__/
+*.py[cod]
