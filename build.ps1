@@ -1,5 +1,6 @@
-param([switch]$Test)
+param([switch]$Test, [switch]$OfflineTest)
 $ErrorActionPreference = 'Stop'
+if ($Test -and $OfflineTest) { throw 'Choose either -Test or -OfflineTest.' }
 Set-Location -LiteralPath $PSScriptRoot
 $vc = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat'
 if (-not (Test-Path -LiteralPath $vc)) {
@@ -34,9 +35,9 @@ $agentFile = "SdrEotfAgent-$agentTag.dll"
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'build\generated\agent_filename.h'), ('#pragma once' + "`r`n" + 'inline constexpr const wchar_t* AgentFileName = L"' + $agentFile + '";' + "`r`n"))
 $compile = '@echo off' + "`r`ncall `"$vc`" >nul`r`nif errorlevel 1 exit /b 1`r`n" + @'
 set "CXX=cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /Ibuild\generated"
-set "CORE_OBJECTS=build\core.obj build\checksum.obj build\dxbc_checksum.obj build\isolation_policy.obj build\isolation_host.obj"
+set "CORE_OBJECTS=build\core.obj build\checksum.obj build\dxbc_checksum.obj build\isolation_policy.obj build\isolation_host.obj build\display_refresh.obj build\restoration_cover.obj build\restoration_transition.obj"
 set "HOOK_OBJECTS=build\isolation_thunks.obj build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj"
-%CXX% /c src\core.cpp src\dxbc_checksum.cpp src\isolation_policy.cpp src\isolation_host.cpp src\tray_icon.cpp /Fobuild\
+%CXX% /c src\core.cpp src\dxbc_checksum.cpp src\isolation_policy.cpp src\isolation_host.cpp src\display_refresh.cpp src\restoration_cover.cpp src\restoration_transition.cpp src\tray_icon.cpp /Fobuild\
 if errorlevel 1 exit /b 1
 cl /nologo /utf-8 /O2 /MT /W3 /c src\third_party\DXBCChecksum.c /Fobuild\checksum.obj
 if errorlevel 1 exit /b 1
@@ -66,15 +67,20 @@ if errorlevel 1 exit /b 1
 %CXX% tests\tray_preview.cpp build\tray_icon.obj %CORE_OBJECTS% /Febuild\tray_preview.exe /Fobuild\tray_preview.obj /link advapi32.lib user32.lib gdi32.lib bcrypt.lib
 if errorlevel 1 exit /b 1
 %CXX% tests\tray_state_tests.cpp build\tray_icon.obj %CORE_OBJECTS% /Febuild\tray_state_tests.exe /Fobuild\tray_state_tests.obj /link advapi32.lib user32.lib gdi32.lib shell32.lib bcrypt.lib
+if errorlevel 1 exit /b 1
+%CXX% tests\display_refresh_tests.cpp %CORE_OBJECTS% /Febuild\display_refresh_tests.exe /Fobuild\display_refresh_tests.obj /link advapi32.lib user32.lib bcrypt.lib
+if errorlevel 1 exit /b 1
+%CXX% tests\restoration_transition_tests.cpp build\restoration_transition.obj build\isolation_policy.obj build\dxbc_checksum.obj build\checksum.obj /Febuild\restoration_transition_tests.exe /Fobuild\restoration_transition_tests.obj /link user32.lib
 exit /b %errorlevel%
 '@
 $compile = $compile.Replace('AGENT_FILE', $agentFile)
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'build\compile.cmd'), $compile, [Text.Encoding]::Default)
-$buildMode = if ($Test) { 'test' } else { 'build' }
+$buildMode = if ($Test -or $OfflineTest) { 'test' } else { 'build' }
 & $env:ComSpec /d /c build\compile.cmd $buildMode
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
-if ($Test) {
-    foreach ($testName in @('core_tests', 'isolation_tests', 'agent_selftest', 'tray_preview', 'info_window_tests', 'tray_state_tests')) {
+if ($Test -or $OfflineTest) {
+    $testNames = if ($OfflineTest) { @('core_tests', 'restoration_transition_tests') } else { @('core_tests', 'isolation_tests', 'agent_selftest', 'tray_preview', 'info_window_tests', 'tray_state_tests', 'display_refresh_tests', 'restoration_transition_tests') }
+    foreach ($testName in $testNames) {
         & (Join-Path $PSScriptRoot "build\$testName.exe")
         if ($LASTEXITCODE -ne 0) { throw "$testName failed ($LASTEXITCODE)." }
     }

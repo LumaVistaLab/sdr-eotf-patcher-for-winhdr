@@ -45,6 +45,10 @@ The tray icon shows the active curve in green after an actual shader hit. The or
 
 Switching between Gamma 2.2, Gamma 2.4, and Rec.709 on the same target preserves the verified output mapping. The previous curve stays available while the new shader variant is prepared, and the tray changes directly to the new mode after a confirmed hit.
 
+Curve changes request a desktop composition refresh. When restoring sRGB or exiting, the application attempts to hold the last HDR picture over each previously converted output, restore the original hooks underneath it, compose once under the cover, then uncover the whole output together. Video may briefly appear frozen during this transition. A small amount of the live picture remains visible through the cover to keep underlying windows participating in composition; this can produce a slight blend during the hold. The image stays in local GPU memory and uses a static FP16 scRGB DirectComposition surface; no image file is saved. Covers opt out of Shell fullscreen detection and do not change focus or display modes.
+
+The cover requires an unrotated output and an updated, matching FP16 desktop image; pointer-only startup frames are not accepted. All pixels must be copied and GPU completion confirmed before showing the cover. Protected, inaccessible, unsupported or mismatched captures use the ordinary composition-refresh fallback, which can update regions at different times. The cover is removed on recovery errors, display changes or a one-second wait timeout. Offline checks verify transition ordering, copy bounds and failure cleanup; actual HDR color fidelity, window presentation and the visible transition still require display validation.
+
 The application sends no automatic notifications and writes no persistent runtime logs. Opening the information box again replaces the existing one. While open, it refreshes after display configuration settles; closing it manually prevents display changes from reopening it.
 
 ## Display Changes and Recovery
@@ -52,6 +56,8 @@ The application sends no automatic notifications and writes no persistent runtim
 Connecting or disconnecting a display, or changing its mode, pauses conversion until the display topology settles and output ownership is checked again. When the target is temporarily unavailable, the selected curve is retained while waiting for that target to return. Display names come from EDID when available, with the PnP friendly name as a fallback.
 
 Switching to sRGB or exiting normally restores the original shader path and hook entry bytes without restarting DWM. If restoration has not been confirmed, the application remains running so “退出并恢复” (Exit and restore) can be tried again.
+
+When a cover is available, it is prepared and shown before disabling conversion and is removed only after hook restoration has been confirmed. Without an active cover, the worker requests three spaced composition refreshes before reporting sRGB or exiting. Selecting sRGB again also requests the fallback refresh. These requests do not constitute a frame-level presentation acknowledgement from DWM.
 
 An independent guardian process handles recovery. The helper inside DWM uses a six-second heartbeat timeout to disable conversion and restore entry bytes if heartbeats stop. The inactive helper DLL and trampoline allocations remain until DWM exits to avoid unloading code that a thread may still reference.
 
@@ -116,7 +122,9 @@ To compile and run all checks:
 .\build.ps1 -Test
 ```
 
-The six check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, the native information-box lifecycle, and tray recovery after display reconnection or failed shell updates. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
+The eight check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, the native information-box lifecycle, tray recovery after display reconnection or failed shell updates, bounded composition refreshes, and restoration-cover ordering, capture validation and exception cleanup. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
+
+For a build with read-only module checks and CPU-only transition tests, use `.\build.ps1 -OfflineTest`. It compiles all checks but runs only `core_tests` and `restoration_transition_tests`, without opening test windows, capturing a display, creating a rendering device, or injecting DWM.
 
 Every successful build synchronizes the latest executable, matching helper, and support files to `dev/` for local testing. Exit the existing development instance before building. Old helper DLLs are retained because DWM may still have them loaded. `dev/RELEASE_NOTES.md` is an exact copy of the repository-root file and describes current functionality without version-change history. Development builds create no ZIP archive and do not write to `dist/`.
 
@@ -165,6 +173,8 @@ After building, a read-only inspection can be run with:
 | `src/main.cpp`, `src/info_window.h`, `src/tray_icon.cpp` | Tray interface, native information box, and icons |
 | `src/core.h`, `src/core.cpp`, `src/dxbc_checksum.cpp` | Common types, system-module reading, shader enumeration, and DXBC checksums |
 | `src/isolation.h`, `src/isolation_host.cpp` | Isolation protocol, display enumeration, guardian, and helper management |
+| `src/display_refresh.h`, `src/display_refresh.cpp` | Bounded full-desktop composition refresh after curve changes and restoration |
+| `src/restoration_cover.h`, `src/restoration_cover.cpp`, `src/restoration_transition.cpp` | Public-API HDR image hold during restoration, validation and transition ordering |
 | `src/isolation_agent.cpp`, `src/isolation_thunks.asm` | In-DWM context identification, shader variants, and hook wrappers |
 | `src/isolation_policy.cpp`, `src/isolation_profile.h` | Output matching, curve conversion rules, and the exact-module profile |
 | `src/app.manifest` | Application privilege and Windows compatibility declarations |

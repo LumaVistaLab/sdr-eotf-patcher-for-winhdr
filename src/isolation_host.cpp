@@ -1,4 +1,6 @@
 #include "isolation.h"
+#include "display_refresh.h"
+#include "restoration_cover.h"
 #include "isolation_profile.h"
 #include "agent_filename.h"
 #include <tlhelp32.h>
@@ -127,14 +129,25 @@ void RestoreIsolated(Shared& s) {
     if(!SameProcess(s)) { InterlockedExchange(&s.dirty,0);return; }
     Handle mapping(OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,s.isolationChannel)); if(!mapping.h) throw Error(WinError("Open isolation recovery channel"));
     auto agent=(IsolationShared*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(IsolationShared)); if(!agent) throw Error(WinError("Map isolation recovery channel"));
-    InterlockedExchange(&agent->enabled,0);InterlockedExchange(&agent->stop,1);
-    auto end=GetTickCount64()+15000; while(GetTickCount64()<end&&agent->state!=2&&agent->state!=3&&SameProcess(s)) Sleep(20);
-    LONG state=agent->state; UnmapViewOfFile(agent);
-    if(!SameProcess(s)) { InterlockedExchange(&s.dirty,0);return; }
-    if(state!=2&&state!=3) throw Error("Isolated agent has not confirmed restoration");
-    EnableDebugPrivilege(); auto process=OpenAgentDwm(s.dwmPid);CheckRestored(process,RemoteModule(s.dwmPid,L"dwmcore.dll"));
+    struct View { IsolationShared* value; ~View(){UnmapViewOfFile(value);} } view{agent};
+    std::unique_ptr<RestorationCover> cover;
+    try {
+        cover=std::make_unique<RestorationCover>(agent->config,RestorationCoverMask(agent->config,agent->stats),
+            [agent](){InterlockedExchange64(&agent->heartbeat,(LONG64)GetTickCount64());});
+    } catch (...) { /* Optional image preparation must not prevent hook recovery. */ }
+    auto restore=[&](){
+        InterlockedExchange(&agent->enabled,0);InterlockedExchange(&agent->stop,1);
+        auto end=GetTickCount64()+15000;
+        while(GetTickCount64()<end&&agent->state!=2&&agent->state!=3&&SameProcess(s)) {
+            if(cover)cover->Poll();Sleep(20);
+        }
+        if(!SameProcess(s))return;
+        if(agent->state!=2&&agent->state!=3)throw Error("Isolated agent has not confirmed restoration");
+        EnableDebugPrivilege();auto process=OpenAgentDwm(s.dwmPid);CheckRestored(process,RemoteModule(s.dwmPid,L"dwmcore.dll"));
+    };
+    if(cover)RestoreWithVisual(*cover,restore,[](){RefreshRestoredDesktop();});
+    else{restore();RefreshRestoredDesktop();}
     InterlockedExchange(&s.dirty,0);
-    RedrawWindow(nullptr,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN);
 }
 struct RemoteBuffer {
     HANDLE process;void* address;
@@ -145,10 +158,15 @@ struct RemoteBuffer {
 };
 struct AgentSession {
     Shared& owner;Handle process,mapping,thread;IsolationShared* state=nullptr;uintptr_t base=0;
+    CompositionRefreshPlan refresh;
     explicit AgentSession(Shared& s):owner(s){}
     ~AgentSession(){if(state){InterlockedExchange(&state->enabled,0);InterlockedExchange(&state->stop,1);if(thread.h)WaitForSingleObject(thread,3000);UnmapViewOfFile(state);}}
     void Update(const IsolationConfig& config) {
         if(state)UpdateIsolationConfig(*state,config);
+    }
+    void Refresh() {
+        if(state&&refresh.Next(state->configSequence,(TransferCurve)state->requestedCurve,
+            state->enabled!=0,AppliedIsolationCurve(*state),GetTickCount64()))RefreshComposedDesktop();
     }
     void Start(const IsolationConfig& config) {
         if(!MatchesIsolationProfile()) throw Error("Installed dwmcore.dll has no exact isolation profile; nothing was injected");
@@ -193,7 +211,7 @@ struct AgentSession {
         if(!owner.dirty)return;
         if(!thread.h||WaitForSingleObject(thread,0)==WAIT_OBJECT_0){
             if(SameProcess(owner))CheckRestored(process,base);
-            InterlockedExchange(&owner.dirty,0);return;
+            RefreshRestoredDesktop();InterlockedExchange(&owner.dirty,0);return;
         }
         RestoreIsolated(owner);
     }
@@ -211,7 +229,7 @@ int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
     std::unique_ptr<AgentSession> agent;TopologyStability topology;
     PublishIsolation(s,Original,L"sRGB · 所有输出保持原始路径");SetEvent(response);HANDLE waits[]={parent,request};
     for(;;){
-        DWORD wait=WaitForMultipleObjects(2,waits,FALSE,1000);auto cmd=(Command)InterlockedExchange(&s.command,None);
+        DWORD wait=WaitForMultipleObjects(2,waits,FALSE,agent&&agent->refresh.Pending()?100:1000);auto cmd=(Command)InterlockedExchange(&s.command,None);
         try{
             if(wait==WAIT_OBJECT_0||cmd==Stop){if(agent)agent->Stop();PublishIsolation(s,Stopped,L"已恢复原始着色器，未重启 DWM");SetEvent(response);return 0;}
             if(wait==WAIT_FAILED)throw Error(WinError("Isolated worker wait"));
@@ -226,6 +244,7 @@ int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
             PublishOutputs(s,config);
             if(wanted==SRGB||!available||!ValidOutputConfig(config)){
                 if(agent){agent->Stop();agent.reset();}
+                else if(cmd==SRGB)RefreshRestoredDesktop();
                 PublishIsolation(s,wanted==SRGB?Original:!available?WaitingHDR:BlockedMixedOutputs,
                     wanted==SRGB?L"sRGB · 所有输出保持原始路径":!available?L"等待所选显示器进入 HDR / 杜比视界模式":L"输出归属不明确（镜像或重叠），保持原始路径");
             }else if(!stable){PublishIsolation(s,Working,L"显示器配置正在更新 · 保持原始路径");
@@ -240,6 +259,7 @@ int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
                     std::wstring detail=hit?std::wstring(CurveName(active))+L" · 仅 "+std::wstring(config.outputs[s.selectedOutput].name)+L" · SDR 副屏旁路":L"显示器隔离已确认 · 等待 SDR 着色器命中";
                     if(hit&&active!=config.curve)detail+=L" · 正在切换到 "+std::wstring(CurveName(config.curve));
                     PublishIsolation(s,hit?Patched:Working,detail,active);}
+                agent->Refresh();
             }
         }catch(const DisplayTransition&){
             topology.Reset();s.outputCount=0;s.selectedOutput=-1;
@@ -255,7 +275,7 @@ int DiagnoseIsolation(const std::wstring& report,bool enable,bool simulateGuardi
     try{auto config=OutputConfiguration();config.curve=curve;result<<L"Transfer curve: "<<CurveName(curve)<<L"\r\n";bool picked=false;for(unsigned i=0;i<config.count;++i)if(config.outputs[i].hdr&&!picked){config.outputs[i].selected=TRUE;picked=true;}
         if(!ValidOutputConfig(config)||!picked)throw Error("No unambiguous HDR target");
         agent.Start(config);InterlockedExchange(&agent.state->inspect,enable?0:1);InterlockedExchange(&agent.state->enabled,enable?1:0);
-        auto end=GetTickCount64()+12000;while(GetTickCount64()<end&&agent.Alive()){InterlockedExchange64(&agent.state->heartbeat,(LONG64)GetTickCount64());Sleep(100);}
+        auto end=GetTickCount64()+12000;while(GetTickCount64()<end&&agent.Alive()){InterlockedExchange64(&agent.state->heartbeat,(LONG64)GetTickCount64());agent.Refresh();Sleep(100);}
         if(simulateGuardianLoss){
             if(WaitForSingleObject(agent.thread,8500)!=WAIT_OBJECT_0||agent.state->state!=2)throw Error("Heartbeat-loss watchdog did not restore the compositor");
             result<<L"PASS: guardian heartbeat intentionally stopped; in-DWM watchdog restored original entries automatically.\r\n";
