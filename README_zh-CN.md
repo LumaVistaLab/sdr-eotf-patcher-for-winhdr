@@ -24,7 +24,7 @@ Windows 更新后，应重新检查模块兼容性。仅修改版本号、文件
 
 ## 使用
 
-1. 解压 `SdrEotfPatcher-portable.zip`。
+1. 解压发布 ZIP（`sdr-eotf-patcher-<版本号>.zip`）并打开对应子文件夹；本地开发版本直接打开 `dev/`。
 2. 保持 `SdrEotfPatcher.exe`、匹配的 `SdrEotfAgent-*.dll` 和 `agent-file.txt` 位于同一目录。
 3. 运行主程序并接受管理员权限请求，随后通过通知区域图标操作。
 4. 在菜单中选择曲线和目标 HDR 显示器。
@@ -118,14 +118,35 @@ Windows 更新后，应重新检查模块兼容性。仅修改版本号、文件
 
 六组检查覆盖源着色器只读枚举和损坏输入拒绝、四条曲线的 WARP GPU 回读、模拟多屏隔离、真实 x64 包装函数与本进程挂钩恢复、托盘文字居中、原生说明窗口生命周期，以及显示器重连或 Shell 更新失败后的托盘恢复。WARP 调试设备检查需要已安装 Direct3D 调试层。这些检查不在系统 DWM 中安装挂钩。
 
-使用 `.\build.ps1 -Test -SyncDist` 可同时将最新主程序、匹配的辅助模块和配套文件同步到 `dist/`，用于本地测试。同步前先退出已有测试实例。`dist/` 继续由 Git 忽略，其中已有内容不作为发布包输入；发布包仅使用 `build/package/` 中的固定文件清单。
+每次成功构建都会将最新主程序、匹配的辅助模块和配套文件同步到 `dev/`，用于本地测试。构建前先退出已有开发实例。旧辅助 DLL 可能仍被 DWM 加载，因此予以保留。`dev/RELEASE_NOTES.md` 与仓库根目录文件完全一致，仅描述当前功能，不记录版本变化。开发构建不生成 ZIP 便携包，也不写入 `dist/`。
 
-构建生成的解包文件位于 `build/package/`，交付文件为 `dist/SdrEotfPatcher-portable.zip` 和相邻的 `.sha256` 文件。打包采用固定文件清单，包含主程序、一个匹配的辅助 DLL、文件名记录、恢复脚本、中英文说明、双语发布说明和许可声明；不包含测试程序、诊断报告、符号缓存和链接产物。
+每次完成仓库修改后，交付测试前都必须同步 `dev/`。程序源码或构建输入变更时重新构建；仅文档或配套文件变更时同步对应文件，并核对开发产物为最新内容。根目录与开发版的 `RELEASE_NOTES.md` 都必须在开头、功能说明之前声明适用的目标二进制文件名、文件版本、架构和 SHA-256。
+
+`build/package/` 是本次构建的干净暂存目录。固定文件清单包含主程序、一个匹配的辅助 DLL、文件名记录、恢复脚本、中英文说明、发布说明和许可声明；发布产物不包含测试程序、诊断报告、符号缓存和链接产物。
+
+发布时机与版本号由仓库所有者决定。只有收到发布指令后，才整理该版本的实际变化，保存为 UTF-8 Markdown 文件，并使用指定版本号执行下列命令（此处版本号仅为示例）：
+
+```powershell
+.\release.ps1 -Version v1.0-stable -ChangesPath .\build\release-changes.md -Test
+```
+
+发布脚本重新构建，在发布副本的 `RELEASE_NOTES.md` 开头声明发布程序版本，以及适用的目标二进制文件名、文件版本、架构和 SHA-256，随后列出提供的版本变化。目标二进制声明取自本次构建的说明；缺少文件版本或摘要时拒绝打包。脚本创建：
+
+```text
+dist/
+  sdr-eotf-patcher-v1.0-stable/
+  sdr-eotf-patcher-v1.0-stable.zip
+  sdr-eotf-patcher-v1.0-stable.zip.sha256
+```
+
+ZIP 包含完整的同名子文件夹；两份 README 的标题均为 `SDR EOTF Patcher for Windows HDR`。校验文件记录 ZIP 的 SHA-256 摘要及文件名。所有历史发布产物均予保留；同版本目录、ZIP 或校验文件中任何一项已存在时，拒绝复用该版本号。在所有者要求首次发布之前，`dist/` 保持为空，不存放开发文件或开发便携包。发布打包不改动根目录和开发目录的发布说明。发布输入仅取自本次干净暂存目录，不使用 `dev/` 或历史 `dist/` 内容。
+
+运行 `.\tests\packaging_tests.ps1` 可在 `build/` 下的隔离测试目录中检查发布流程，不会在仓库的 `dist/` 中创建真实发布。
 
 构建后可运行只读检查：
 
 ```powershell
-.\build\package\SdrEotfPatcher.exe --inspect "$PWD\build\inspection.txt"
+.\dev\SdrEotfPatcher.exe --inspect "$PWD\build\inspection.txt"
 ```
 
 ## 项目结构
@@ -134,9 +155,11 @@ Windows 更新后，应重新检查模块兼容性。仅修改版本号、文件
 | --- | --- |
 | `README.md` | 英文项目说明 |
 | `README_zh-CN.md` | 简体中文项目说明 |
-| `RELEASE_NOTES.md` | 中英双语发布说明 |
+| `RELEASE_NOTES.md` | 当前功能的中英双语说明，不记录版本变化 |
 | `LICENSE` | GNU GPL v3 许可全文 |
-| `build.ps1` | 构建、检查和打包入口 |
+| `build.ps1` | 构建、检查和开发产物同步入口 |
+| `release.ps1` | 使用显式版本号和版本变化说明进行发布打包 |
+| `AGENTS.md` | 仓库开发与发布约定 |
 | `Restore-Display.ps1` | 重新应用 Windows 保存的显示配置 |
 | `.gitignore` | 构建产物和缓存的版本控制忽略规则 |
 | `src/main.cpp`、`src/info_window.h`、`src/tray_icon.cpp` | 托盘界面、原生说明窗口和图标 |
@@ -147,11 +170,12 @@ Windows 更新后，应重新检查模块兼容性。仅修改版本号、文件
 | `src/app.manifest` | 应用权限和 Windows 兼容性声明 |
 | `src/third_party/` | 第三方源码、版权和许可声明 |
 | `tests/` | 独立进程检查程序 |
-| `tools/` | 公开符号下载、符号枚举、磁盘反汇编和配置生成工具 |
+| `tools/` | 共享打包清单、公开符号下载、符号枚举、磁盘反汇编和配置生成工具 |
 | `build/` | 中间文件、缓存和待打包文件，不纳入版本控制 |
-| `dist/` | 交付压缩包及 SHA256 校验文件，不纳入版本控制 |
+| `dev/` | 解包形式的开发版本，不纳入版本控制 |
+| `dist/` | 历史发布目录、ZIP 压缩包及 SHA-256 校验文件，不纳入版本控制 |
 
-`tools/` 不参与普通构建。研究工具从仓库根目录运行，使用 `build/` 存放中间数据；反汇编脚本另需 Python、Capstone 和 pefile。配置生成脚本只接受其内置摘要对应的磁盘模块，其他版本需要重新分析入口、参数和内存布局。
+`tools/package_manifest.ps1` 为开发构建和发布提供固定文件清单，其余研究工具不参与普通构建。研究工具从仓库根目录运行，使用 `build/` 存放中间数据；反汇编脚本另需 Python、Capstone 和 pefile。配置生成脚本只接受其内置摘要对应的磁盘模块，其他版本需要重新分析入口、参数和内存布局。
 
 ## 许可与第三方组件
 

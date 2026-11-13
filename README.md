@@ -24,7 +24,7 @@ Check module compatibility again after Windows updates. Changing only the versio
 
 ## Usage
 
-1. Extract `SdrEotfPatcher-portable.zip`.
+1. Extract the release ZIP (`sdr-eotf-patcher-<version>.zip`) and open its matching folder, or open `dev/` for a local development build.
 2. Keep `SdrEotfPatcher.exe`, its matching `SdrEotfAgent-*.dll`, and `agent-file.txt` in the same directory.
 3. Run the executable and accept the administrator permission request, then use its notification-area icon.
 4. Select a curve and the target HDR display from the menu.
@@ -118,14 +118,35 @@ To compile and run all checks:
 
 The six check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, the native information-box lifecycle, and tray recovery after display reconnection or failed shell updates. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
 
-Use `.\build.ps1 -Test -SyncDist` to also synchronize the latest executable, matching helper, and support files to `dist/` for local testing. Exit the existing test instance before synchronizing. `dist/` stays excluded from Git; its existing contents are never used as release-package input. The package uses only the fixed manifest from `build/package/`.
+Every successful build synchronizes the latest executable, matching helper, and support files to `dev/` for local testing. Exit the existing development instance before building. Old helper DLLs are retained because DWM may still have them loaded. `dev/RELEASE_NOTES.md` is an exact copy of the repository-root file and describes current functionality without version-change history. Development builds create no ZIP archive and do not write to `dist/`.
 
-Unpacked build output is placed in `build/package/`. Delivery files are `dist/SdrEotfPatcher-portable.zip` and its adjacent `.sha256` file. A fixed manifest packages the executable, one matching helper DLL, the filename record, the recovery script, both English and Simplified Chinese documentation, bilingual release notes, and license notices. Test executables, diagnostic reports, symbol caches, and linker output are excluded.
+Refresh `dev/` after every repository change before handing it back for testing. Rebuild changes to program source or build inputs; for documentation or support-file changes only, synchronize the corresponding files and verify that the development output is current. Both the root and development `RELEASE_NOTES.md` must start with the applicable target binary's filename, file version, architecture, and SHA-256, before the functionality descriptions.
+
+`build/package/` is clean staging for the current build. A fixed manifest includes the executable, one matching helper DLL, the filename record, the recovery script, both English and Simplified Chinese documentation, release notes, and license notices. Test executables, diagnostic reports, symbol caches, and linker output are excluded from releases.
+
+Release timing and version numbers are chosen by the repository owner. Only when a release is requested, prepare a UTF-8 Markdown file describing that version's actual changes, then run the following command with the chosen version (the version below is an example):
+
+```powershell
+.\release.ps1 -Version v1.0-stable -ChangesPath .\build\release-changes.md -Test
+```
+
+The release script makes a fresh build. At the beginning of the release copy of `RELEASE_NOTES.md`, it declares the release binary version and the applicable target binary's filename, file version, architecture, and SHA-256, followed by the supplied version changes. The target binary declaration comes from the current build's notes; missing version or digest information prevents packaging. The script creates:
+
+```text
+dist/
+  sdr-eotf-patcher-v1.0-stable/
+  sdr-eotf-patcher-v1.0-stable.zip
+  sdr-eotf-patcher-v1.0-stable.zip.sha256
+```
+
+The ZIP contains the complete named folder. Both README titles are `SDR EOTF Patcher for Windows HDR`. The checksum file records the ZIP's SHA-256 digest and filename. Existing releases are retained; an existing version's folder, ZIP, or checksum prevents reuse of that version. Before the first owner-requested release, `dist/` stays empty; development files and development archives do not belong there. The root and development release notes stay unchanged by release packaging. Release inputs come exclusively from clean staging, never from `dev/` or historical `dist/` contents.
+
+Run `.\tests\packaging_tests.ps1` to check the release workflow in an isolated fixture under `build/`; it does not create a real release in the repository's `dist/`.
 
 After building, a read-only inspection can be run with:
 
 ```powershell
-.\build\package\SdrEotfPatcher.exe --inspect "$PWD\build\inspection.txt"
+.\dev\SdrEotfPatcher.exe --inspect "$PWD\build\inspection.txt"
 ```
 
 ## Repository Layout
@@ -134,9 +155,11 @@ After building, a read-only inspection can be run with:
 | --- | --- |
 | `README.md` | English project documentation |
 | `README_zh-CN.md` | Simplified Chinese project documentation |
-| `RELEASE_NOTES.md` | Bilingual release notes |
+| `RELEASE_NOTES.md` | Current bilingual functionality notes; no version-change history |
 | `LICENSE` | Full GNU GPL v3 license text |
-| `build.ps1` | Build, checks, and packaging entry point |
+| `build.ps1` | Build, checks, and development-output synchronization |
+| `release.ps1` | Explicitly versioned release packaging with supplied changes |
+| `AGENTS.md` | Repository development and release rules |
 | `Restore-Display.ps1` | Reapply the display configuration saved by Windows |
 | `.gitignore` | Version-control exclusions for build output and caches |
 | `src/main.cpp`, `src/info_window.h`, `src/tray_icon.cpp` | Tray interface, native information box, and icons |
@@ -147,11 +170,12 @@ After building, a read-only inspection can be run with:
 | `src/app.manifest` | Application privilege and Windows compatibility declarations |
 | `src/third_party/` | Third-party source, copyright, and license notices |
 | `tests/` | Standalone check programs |
-| `tools/` | Public-symbol download, symbol enumeration, on-disk disassembly, and profile-generation tools |
+| `tools/` | Shared package manifest, public-symbol download, symbol enumeration, on-disk disassembly, and profile-generation tools |
 | `build/` | Intermediate files, caches, and package staging; excluded from version control |
-| `dist/` | Delivery archive and SHA256 checksum file; excluded from version control |
+| `dev/` | Unpacked development builds; excluded from version control |
+| `dist/` | Historical release folders, ZIP archives, and SHA-256 files; excluded from version control |
 
-`tools/` is not part of a normal build. Run research tools from the repository root; they use `build/` for intermediate data. The disassembly script also requires Python, Capstone, and pefile. The profile-generation script accepts only the on-disk module matching its built-in digest. Supporting another version requires analysis of its entry points, arguments, and memory layout.
+`tools/package_manifest.ps1` supplies the fixed file list for development and release builds. The other tools are for research and are not part of a normal build. Run research tools from the repository root; they use `build/` for intermediate data. The disassembly script also requires Python, Capstone, and pefile. The profile-generation script accepts only the on-disk module matching its built-in digest. Supporting another version requires analysis of its entry points, arguments, and memory layout.
 
 ## License and Third-Party Components
 

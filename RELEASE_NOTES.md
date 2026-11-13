@@ -1,6 +1,24 @@
 # Release Notes / 发布说明
 
-## Current release / 当前版本
+## Applicable binary / 适用的二进制
+
+Target binary / 目标二进制: `dwmcore.dll` `10.0.26100.8875` (Windows x64).
+
+SHA-256:
+
+```text
+825726F26BD6B5A02B49F6145963B54D537D3D1239055DDA28D1FB0B3E864EF3
+```
+
+Only this exact binary is supported. The file digest and hook entry bytes must match the built-in isolation profile.
+
+仅适用于上述精确二进制文件；文件摘要和挂钩入口字节必须与内置隔离配置匹配。
+
+## Current functionality / 当前功能
+
+This repository-root file and its exact copy in `dev/` describe the current build without version-change history. Published copies in `dist/` also include the owner-selected version and its actual changes.
+
+仓库根目录文件及其在 `dev/` 中的完全相同副本仅描述当前构建，不记录版本变化。`dist/` 中的发布副本另包含所有者指定的版本号及该版本的实际变化。
 
 ### Features / 功能
 
@@ -42,19 +60,19 @@
 
   提供只读模块检查、运行实例的命令行控制，以及主动调用的实时隔离和看门狗诊断。实时诊断会安装 DWM 挂钩，仅在调用时生成报告。
 
-- Replace legacy global-patch generation with read-only shader enumeration, and remove unused wrappers and shared fields. Original bytecode and shared shader libraries remain unchanged.
+- Enumerate source shaders read-only. Original bytecode and shared shader libraries remain unchanged.
 
-  将旧全局补丁生成代码替换为只读着色器枚举，清理未使用的包装函数和共享字段；原字节码及共享着色器库保持原样。
+  以只读方式枚举源着色器；原字节码及共享着色器库保持原样。
 
 ### Packaging and licensing / 打包与许可
 
-- Ship a portable executable with one matching versioned helper DLL, `agent-file.txt`, and `Restore-Display.ps1`.
+- Keep unpacked development files in `dev/`, including the executable, its matching versioned helper DLL, `agent-file.txt`, and `Restore-Display.ps1`. Development builds create no portable archive.
 
-  便携包包含主程序、唯一匹配的版本化辅助 DLL、`agent-file.txt` 和 `Restore-Display.ps1`。
+  开发文件以解包形式保存在 `dev/`，包含主程序、匹配的版本化辅助 DLL、`agent-file.txt` 和 `Restore-Display.ps1`；开发构建不生成便携压缩包。
 
-- Include English and Simplified Chinese READMEs and this bilingual release note. Package files through a fixed manifest and provide a SHA256 checksum for the archive.
+- Include English and Simplified Chinese READMEs and this bilingual note. Owner-requested releases use a fixed manifest, a versioned `sdr-eotf-patcher-<version>` folder, a ZIP containing that folder, and an adjacent SHA-256 file. Preserve historical releases by default.
 
-  随包提供英文和简体中文 README，以及本双语发布说明；使用固定清单打包，并为压缩包提供 SHA256 校验文件。
+  提供英文和简体中文 README，以及本双语说明。按所有者指令发布时，使用固定清单生成带版本号的 `sdr-eotf-patcher-<版本号>` 文件夹、包含该文件夹的 ZIP 和相邻的 SHA-256 校验文件；默认保留历史发布。
 
 - License the project under GNU GPL v3 and retain the third-party copyright and license notices.
 
@@ -73,12 +91,6 @@
 - Apply conversion only to matching SDR decoding instruction groups. Native HDR/PQ/HLG receives no whole-frame Gamma or LUT processing; exclusive fullscreen, direct MPO presentation, and application-generated scRGB may bypass conversion.
 
   仅转换匹配的 SDR 解码指令组。原生 HDR/PQ/HLG 不进行整帧 Gamma 或 LUT 处理；独占全屏、MPO 直出和应用自行输出 scRGB 的路径可能绕过转换。
-
-Supported module SHA256 / 支持的模块 SHA256：
-
-```text
-825726F26BD6B5A02B49F6145963B54D537D3D1239055DDA28D1FB0B3E864EF3
-```
 
 Usage, command-line options, and build instructions are in `README.md`.
 

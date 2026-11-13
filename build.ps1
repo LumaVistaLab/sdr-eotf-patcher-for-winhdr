@@ -1,4 +1,4 @@
-param([switch]$Test, [switch]$SyncDist)
+param([switch]$Test)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $vc = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat'
@@ -10,7 +10,16 @@ if (-not (Test-Path -LiteralPath $vc)) {
     }
 }
 if (-not (Test-Path -LiteralPath $vc)) { throw 'Install Visual Studio C++ tools and the Windows SDK.' }
-New-Item -ItemType Directory -Path build,build\generated,dist -Force | Out-Null
+New-Item -ItemType Directory -Path build,build\generated,dev -Force | Out-Null
+$dev = Join-Path $PSScriptRoot 'dev'
+if ((Get-Item -LiteralPath $dev).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Development output cannot be a link.' }
+$devExecutable = Join-Path $dev 'SdrEotfPatcher.exe'
+if (Test-Path -LiteralPath $devExecutable) {
+    if ((Get-Item -LiteralPath $devExecutable).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Development executable cannot be a link.' }
+    # Fail before compilation or synchronization so an active copy cannot leave a mixed installation.
+    try { $probe = [IO.File]::Open($devExecutable, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $probe.Dispose() }
+    catch { throw 'Development executable is in use or not writable. Exit the development instance before building.' }
+}
 # This staging directory contains generated delivery files only. Never replace a running installation.
 $package = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'build\package'))
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'build')) + [IO.Path]::DirectorySeparatorChar
@@ -61,7 +70,7 @@ exit /b %errorlevel%
 '@
 $compile = $compile.Replace('AGENT_FILE', $agentFile)
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'build\compile.cmd'), $compile, [Text.Encoding]::Default)
-$buildMode = if ($Test) { 'test' } else { 'release' }
+$buildMode = if ($Test) { 'test' } else { 'build' }
 & $env:ComSpec /d /c build\compile.cmd $buildMode
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 if ($Test) {
@@ -74,22 +83,14 @@ if ($Test) {
 Copy-Item -LiteralPath README.md,README_zh-CN.md,RELEASE_NOTES.md,LICENSE,Restore-Display.ps1 -Destination $package -Force
 Copy-Item -LiteralPath src\third_party\THIRD_PARTY_NOTICES,src\third_party\dwm_eotf_rs-LICENSE -Destination $package -Force
 Copy-Item -LiteralPath src\third_party\minhook\LICENSE.txt -Destination (Join-Path $package 'MinHook-LICENSE.txt') -Force
-# Package an explicit manifest so diagnostics, tests, symbols and old agents cannot enter the archive.
-$packageFiles = @('SdrEotfPatcher.exe', $agentFile, 'agent-file.txt', 'README.md', 'README_zh-CN.md', 'RELEASE_NOTES.md', 'LICENSE', 'Restore-Display.ps1', 'THIRD_PARTY_NOTICES', 'dwm_eotf_rs-LICENSE', 'MinHook-LICENSE.txt')
-$packagePaths = @($packageFiles | ForEach-Object { Join-Path $package $_ })
-$archive = Join-Path $PSScriptRoot 'dist\SdrEotfPatcher-portable.zip'
-$stagedArchive = Join-Path $PSScriptRoot 'build\SdrEotfPatcher-portable.zip'
-Compress-Archive -LiteralPath $packagePaths -DestinationPath $stagedArchive -Force
-Move-Item -LiteralPath $stagedArchive -Destination $archive -Force
-$digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($archive + '.sha256', $digest + '  SdrEotfPatcher-portable.zip' + "`r`n", [Text.Encoding]::ASCII)
-Write-Output "Package: $archive"
-Write-Output "Unpacked files: $package"
-if ($SyncDist) {
-    # Local test installation only; keep old versioned DLLs that DWM may still have loaded.
-    $testDist = Join-Path $PSScriptRoot 'dist'
-    if ((Get-Item -LiteralPath $testDist).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Test dist cannot be a link.' }
-    $syncFiles = @($packageFiles | Where-Object { $_ -ne 'SdrEotfPatcher.exe' }) + 'SdrEotfPatcher.exe'
-    foreach ($file in $syncFiles) { Copy-Item -LiteralPath (Join-Path $package $file) -Destination (Join-Path $testDist $file) -Force }
-    Write-Output "Local test files synchronized: $testDist"
+# Development builds are unpacked only. Keep old DLLs that DWM may still have loaded.
+. (Join-Path $PSScriptRoot 'tools\package_manifest.ps1')
+$packageFiles = @(Get-PackageFileNames -PackageDirectory $package)
+$syncFiles = @($packageFiles | Where-Object { $_ -ne 'SdrEotfPatcher.exe' }) + 'SdrEotfPatcher.exe'
+foreach ($file in $syncFiles) {
+    $destination = Join-Path $dev $file
+    if ((Test-Path -LiteralPath $destination) -and ((Get-Item -LiteralPath $destination).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Development file cannot be a link: $destination" }
+    Copy-Item -LiteralPath (Join-Path $package $file) -Destination $destination -Force
 }
+Write-Output "Development files synchronized: $dev"
+Write-Output "Clean staging files: $package"
