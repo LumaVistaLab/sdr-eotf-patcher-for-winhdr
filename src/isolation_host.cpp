@@ -148,8 +148,7 @@ struct AgentSession {
     explicit AgentSession(Shared& s):owner(s){}
     ~AgentSession(){if(state){InterlockedExchange(&state->enabled,0);InterlockedExchange(&state->stop,1);if(thread.h)WaitForSingleObject(thread,3000);UnmapViewOfFile(state);}}
     void Update(const IsolationConfig& config) {
-        if(!state||!memcmp(&state->config,&config,sizeof(config)))return;
-        InterlockedExchange(&state->enabled,0);InterlockedIncrement(&state->configSequence);memcpy(&state->config,&config,sizeof(config));MemoryBarrier();InterlockedIncrement(&state->configSequence);
+        if(state)UpdateIsolationConfig(*state,config);
     }
     void Start(const IsolationConfig& config) {
         if(!MatchesIsolationProfile()) throw Error("Installed dwmcore.dll has no exact isolation profile; nothing was injected");
@@ -160,7 +159,9 @@ struct AgentSession {
         mapping=Handle(CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(IsolationShared),owner.isolationChannel));if(!mapping.h)throw Error(WinError("Create isolation channel"));
         AllowAgentMapping(process,mapping);
         state=(IsolationShared*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(IsolationShared));if(!state)throw Error(WinError("Map isolation channel"));
-        ZeroMemory(state,sizeof(*state));state->protocol=IsolationProtocol;InterlockedExchange64(&state->heartbeat,(LONG64)GetTickCount64());Update(config);
+        ZeroMemory(state,sizeof(*state));state->protocol=IsolationProtocol;
+        state->stats.appliedCurve=(LONG)TransferCurve::SRGB;
+        InterlockedExchange64(&state->heartbeat,(LONG64)GetTickCount64());Update(config);
         auto path=AgentPath();AgentReadPermission permission(process,path);RemoteBuffer remotePath(process,path.c_str(),(path.size()+1)*sizeof(wchar_t));
         auto loader=(BYTE*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");HMODULE containing=nullptr;
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCWSTR)loader,&containing))throw Error(WinError("Find loader module"));
@@ -235,8 +236,10 @@ int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
                 if(a.state==3)throw Error(Utf8(a.detail));
                 if(a.stats.mappingConflict){InterlockedExchange(&a.enabled,0);PublishIsolation(s,BlockedMixedOutputs,L"检测到显示器上下文冲突，所有输出保持原始路径");}
                 else if(a.stats.contextsMask!=((1L<<config.count)-1)){InterlockedExchange(&a.enabled,0);PublishIsolation(s,Working,L"正在核对显示器归属 · "+std::to_wstring(a.stats.contextsMask)+L" / "+std::to_wstring((1L<<config.count)-1));}
-                else{InterlockedExchange(&a.enabled,1);bool hit=a.stats.appliedSequence==a.configSequence;
-                    PublishIsolation(s,hit?Patched:Working,hit?std::wstring(CurveName(config.curve))+L" · 仅 "+std::wstring(config.outputs[s.selectedOutput].name)+L" · SDR 副屏旁路":L"显示器隔离已确认 · 等待 SDR 着色器命中",hit?config.curve:TransferCurve::SRGB);}
+                else{InterlockedExchange(&a.enabled,1);auto active=AppliedIsolationCurve(a);bool hit=active!=TransferCurve::SRGB;
+                    std::wstring detail=hit?std::wstring(CurveName(active))+L" · 仅 "+std::wstring(config.outputs[s.selectedOutput].name)+L" · SDR 副屏旁路":L"显示器隔离已确认 · 等待 SDR 着色器命中";
+                    if(hit&&active!=config.curve)detail+=L" · 正在切换到 "+std::wstring(CurveName(config.curve));
+                    PublishIsolation(s,hit?Patched:Working,detail,active);}
             }
         }catch(const DisplayTransition&){
             topology.Reset();s.outputCount=0;s.selectedOutput=-1;

@@ -14,6 +14,7 @@ static constexpr UINT IdGamma = 100, IdSRGB = 101, IdInfo = 102, IdExit = 103;
 static constexpr UINT IdGamma24 = 104, IdRec709 = 105;
 static constexpr UINT IdOutputBase = 1000;
 static constexpr UINT TimerId = 1;
+static constexpr ULONGLONG IconRefreshInterval = 5000;
 static std::wstring ExePath() { wchar_t p[32768]; DWORD n = GetModuleFileNameW(nullptr, p, 32768); if (!n || n >= 32768) throw Error("Cannot locate executable"); return p; }
 static std::wstring Directory() { auto p = ExePath(); return p.substr(0, p.find_last_of(L"\\/")); }
 static bool Admin() {
@@ -78,6 +79,7 @@ struct Tray {
     Command selected = Gamma22;
     LONG lastStatus = -1;
     TransferCurve lastCurve = TransferCurve::SRGB;
+    ULONGLONG nextIconRefresh = 0;
     std::wstring lastDetail;
     std::wstring lastError;
     InfoWindow info;
@@ -95,16 +97,26 @@ struct Tray {
         std::wstring tip=L"SDR EOTF · "+text;wcsncpy_s(icon.szTip,tip.c_str(),_TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &icon);
     }
-    void Refresh() {
+    void Refresh(ULONGLONG now = GetTickCount64()) {
         if (!channel.s) return;
         LONG state = InterlockedCompareExchange(&channel.s->status, 0, 0); MemoryBarrier();
         std::wstring detail = channel.s->detail;
         auto curve = state == Patched ? (TransferCurve)InterlockedCompareExchange(&channel.s->activeCurve,0,0) : TransferCurve::SRGB;
         if (!ValidCurve(curve)) curve = TransferCurve::SRGB;
-        if (state != lastStatus || detail != lastDetail || curve != lastCurve) {
+        bool changed = state != lastStatus || detail != lastDetail || curve != lastCurve;
+        // Explorer can lose an accepted update while rebuilding the notification area.
+        if (changed || now >= nextIconRefresh) {
             icon.uFlags = NIF_ICON | NIF_TIP; icon.hIcon = curveIcons[(int)curve];
-            std::wstring tip = L"SDR EOTF · " + detail; wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE); Shell_NotifyIconW(NIM_MODIFY, &icon);
+            if (changed) { std::wstring tip = L"SDR EOTF · " + detail; wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE); }
+            if (!Shell_NotifyIconW(NIM_MODIFY, &icon)) {
+                // A display change may also recreate the tray without TaskbarCreated.
+                icon.uFlags |= NIF_MESSAGE | NIF_SHOWTIP;
+                if (!Shell_NotifyIconW(NIM_ADD, &icon)) return;
+                icon.uVersion = NOTIFYICON_VERSION_4; Shell_NotifyIconW(NIM_SETVERSION, &icon);
+            }
+            // Cache only accepted updates so a failed call is retried on the next poll.
             lastStatus = state; lastDetail = detail; lastCurve = curve;
+            nextIconRefresh = now + IconRefreshInterval;
         }
     }
     void Set(Command cmd) {
@@ -211,7 +223,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (msg == StateMessage) return app->channel.s ? InterlockedCompareExchange(&app->channel.s->status, 0, 0) : Starting;
         if (msg == InfoWindow::RequestMessage) { app->info.Dispatch();return 0; }
-        if (msg == WM_DISPLAYCHANGE) { app->info.DisplayChanged();return 0; }
+        if (msg == WM_DISPLAYCHANGE) { app->lastStatus = -1;app->info.DisplayChanged();return 0; }
         if (msg == WM_TIMER) { if(wp==InfoWindow::Timer)app->info.Tick();else if(wp==TimerId)app->Poll(); return 0; }
         if (msg == WM_CLOSE) { app->Close(); return 0; }
         if (msg == WM_QUERYENDSESSION) return TRUE;

@@ -37,6 +37,34 @@ bool TopologyStability::Observe(const IsolationConfig& config, ULONGLONG now) {
     if (!observed || !SameOutputTopology(previous,config)) { previous=config;observed=true;changedAt=now; }
     return now-changedAt>=1000;
 }
+void UpdateIsolationConfig(IsolationShared& shared, const IsolationConfig& config) {
+    auto outputs = config; outputs.curve = shared.config.curve;
+    if (memcmp(&shared.config, &outputs, sizeof(outputs))) {
+        InterlockedExchange(&shared.enabled, 0);
+        InterlockedIncrement(&shared.configSequence);
+        memcpy(&shared.config, &config, sizeof(config));
+        InterlockedExchange(&shared.fallbackCurve, (LONG)TransferCurve::SRGB);
+        MemoryBarrier(); InterlockedIncrement(&shared.configSequence);
+    } else if (shared.requestedCurve != (LONG)config.curve) {
+        // Keep the last confirmed curve available while a new variant is prepared.
+        InterlockedExchange(&shared.fallbackCurve, (LONG)AppliedIsolationCurve(shared));
+    }
+    InterlockedExchange(&shared.requestedCurve, (LONG)config.curve);
+}
+bool ReadIsolationConfig(IsolationShared& shared, IsolationConfig& config, LONG& sequence) {
+    sequence = InterlockedCompareExchange(&shared.configSequence, 0, 0);
+    if (sequence & 1) return false;
+    memcpy(&config, &shared.config, sizeof(config));
+    config.curve = (TransferCurve)InterlockedCompareExchange(&shared.requestedCurve, 0, 0);
+    MemoryBarrier();
+    return sequence == InterlockedCompareExchange(&shared.configSequence, 0, 0) && ValidOutputConfig(config);
+}
+TransferCurve AppliedIsolationCurve(IsolationShared& shared) {
+    LONG sequence = InterlockedCompareExchange(&shared.configSequence, 0, 0);
+    if ((sequence & 1) || sequence != InterlockedCompareExchange(&shared.stats.appliedSequence, 0, 0)) return TransferCurve::SRGB;
+    auto curve = (TransferCurve)InterlockedCompareExchange(&shared.stats.appliedCurve, 0, 0);
+    return ValidCurve(curve) ? curve : TransferCurve::SRGB;
+}
 bool ValidOutputConfig(const IsolationConfig& c) {
     if (c.protocol != IsolationProtocol || !c.count || c.count > MaxOutputs || !ValidCurve(c.curve)) return false;
     for (unsigned i = 0; i < c.count; ++i) {

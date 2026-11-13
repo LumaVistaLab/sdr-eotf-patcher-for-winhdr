@@ -43,10 +43,7 @@ bool ReadShaderBlob(void* linked, const BYTE** p, size_t* size) noexcept {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 bool ReadConfig(IsolationShared* s, IsolationConfig& c, LONG& sequence) {
-    sequence = InterlockedCompareExchange(&s->configSequence, 0, 0);
-    if (sequence & 1) return false;
-    memcpy(&c, &s->config, sizeof(c)); MemoryBarrier();
-    return sequence == InterlockedCompareExchange(&s->configSequence,0,0) && ValidOutputConfig(c);
+    return ReadIsolationConfig(*s, c, sequence);
 }
 Scope Identify(void* context, size_t offset) {
     auto s = shared; Scope result; if (!s) return result;
@@ -67,10 +64,16 @@ Scope Identify(void* context, size_t offset) {
     }
     ReleaseSRWLockExclusive(&contextLock); return result;
 }
-ID3D11PixelShader* Variant(void* linked, ID3D11PixelShader* original, IsolationShared* s, TransferCurve curve) {
-    const GUID variantGuid = CurveGuid(VariantGuid,curve), checkedGuid = CurveGuid(CheckedGuid,curve);
+ID3D11PixelShader* CachedVariant(ID3D11PixelShader* original, TransferCurve curve) {
+    const GUID variantGuid = CurveGuid(VariantGuid,curve);
     ID3D11PixelShader* result = nullptr; UINT size = sizeof(result);
     if (SUCCEEDED(original->GetPrivateData(variantGuid,&size,&result)) && result) { result->Release(); return result; }
+    return nullptr;
+}
+ID3D11PixelShader* Variant(void* linked, ID3D11PixelShader* original, IsolationShared* s, TransferCurve curve) {
+    const GUID variantGuid = CurveGuid(VariantGuid,curve), checkedGuid = CurveGuid(CheckedGuid,curve);
+    if (auto cached = CachedVariant(original,curve)) return cached;
+    ID3D11PixelShader* result = nullptr; UINT size = sizeof(result);
     Checked checked = {}; size = sizeof(checked);
     if (SUCCEEDED(original->GetPrivateData(checkedGuid,&size,&checked)) && checked.protocol == IsolationProtocol && !checked.supported) return nullptr;
     if (!TryAcquireSRWLockExclusive(&shaderLock)) return nullptr;
@@ -90,6 +93,19 @@ ID3D11PixelShader* Variant(void* linked, ID3D11PixelShader* original, IsolationS
     // The original DWM shader owns the variant. We retain no device references outside DWM's lifecycle.
     checked.supported = TRUE; original->SetPrivateData(checkedGuid,sizeof(checked),&checked);
     InterlockedIncrement64(&s->stats.variants); return replacement.Get();
+}
+ID3D11PixelShader* SelectVariant(void* linked, ID3D11PixelShader* original, IsolationShared* s, TransferCurve requested, bool& applied) {
+    auto variant = Variant(linked,original,s,requested); applied = variant != nullptr;
+    if (variant) return variant;
+    auto fallback = (TransferCurve)InterlockedCompareExchange(&s->fallbackCurve,0,0);
+    return ValidCurve(fallback) && fallback != TransferCurve::SRGB ? CachedVariant(original,fallback) : nullptr;
+}
+void RecordReplacement(IsolationShared* s, int output, LONG sequence, TransferCurve curve, bool applied) {
+    InterlockedIncrement64(&s->stats.replacements[output]);
+    if (applied && (LONG)curve == InterlockedCompareExchange(&s->requestedCurve,0,0)) {
+        InterlockedExchange(&s->stats.appliedCurve,(LONG)curve);
+        InterlockedExchange(&s->stats.appliedSequence,sequence);
+    }
 }
 void* FindLinkedByShader(ID3D11PixelShader* shader) {
     if(!commonCache)return nullptr;
@@ -142,8 +158,8 @@ extern "C" HRESULT LinkedShaderHook(void* self, void* device, UINT* vs, ID3D11Pi
         return hr;
     }
     try {
-        auto variant = Variant(self,*output,s,config.curve);
-        if (variant && s->enabled && sequence == s->configSequence) { *output = variant; InterlockedIncrement64(&s->stats.replacements[i]); InterlockedExchange(&s->stats.appliedSequence,sequence); }
+        bool applied = false; auto variant = SelectVariant(self,*output,s,config.curve,applied);
+        if (variant && s->enabled && sequence == s->configSequence) { *output = variant; RecordReplacement(s,i,sequence,config.curve,applied); }
         else InterlockedIncrement64(&s->stats.unsupported[i]);
     } catch (...) { InterlockedExchange(&s->enabled,0); SetMessage(s,L"着色器变体创建失败，已恢复原路径",3); }
     return hr;
@@ -160,8 +176,8 @@ extern "C" HRESULT CommonShaderHook(void* self,void* device,const void* desc,UIN
     try{
         auto linked=FindLinkedByShader(*output);if(!linked){InterlockedIncrement64(&s->stats.unsupported[i]);return hr;}
         if(!s->enabled){if(InspectCandidate(linked,*output,config.curve))InterlockedIncrement64(&s->stats.candidates[i]);return hr;}
-        auto replacement=Variant(linked,*output,s,config.curve);
-        if(replacement&&s->enabled&&sequence==s->configSequence){*output=replacement;InterlockedIncrement64(&s->stats.replacements[i]);InterlockedExchange(&s->stats.appliedSequence,sequence);}
+        bool applied=false;auto replacement=SelectVariant(linked,*output,s,config.curve,applied);
+        if(replacement&&s->enabled&&sequence==s->configSequence){*output=replacement;RecordReplacement(s,i,sequence,config.curve,applied);}
         else InterlockedIncrement64(&s->stats.unsupported[i]);
     }catch(...){InterlockedExchange(&s->enabled,0);SetMessage(s,L"缓存变体检查失败，已保持原始路径",3);}
     return hr;
@@ -233,6 +249,7 @@ void* testLinked = nullptr;
 UINT* testVertex = nullptr;
 ID3D11PixelShader** testOutput = nullptr;
 bool testFailed = false;
+TransferCurve testFallback = TransferCurve::SRGB;
 ID3D11PixelShader* testVariants[3] = {};
 __declspec(noinline) HRESULT TestShaderOriginal(void*, void*, UINT*, ID3D11PixelShader** out) { *out=testShader;return S_OK; }
 __declspec(noinline) HRESULT TestCommonOriginal(void*,void*,const void* desc,UINT* vertex,ID3D11PixelShader** out){
@@ -243,8 +260,9 @@ __declspec(noinline) HRESULT TestRenderOriginal(void*, void*) {
     ID3D11PixelShader* out=nullptr; UINT vertex=0;
     ShaderFn volatile invoke=TestShaderOriginal;invoke(testLinked,nullptr,&vertex,&out);
     bool complete=shared->stats.contextsMask==7;
-    auto curve=shared->config.curve;
+    auto curve=(TransferCurve)shared->requestedCurve;
     bool gamma=complete&&shared->enabled&&currentScope.output==0&&curve!=TransferCurve::SRGB;
+    if(gamma&&testFallback!=TransferCurve::SRGB)curve=testFallback;
     if(gamma ? out==testShader : out!=testShader) testFailed=true;
     auto linkedResult=out;
     if(gamma){auto& cached=testVariants[(int)curve];if(cached&&cached!=out)testFailed=true;cached=out;}
@@ -262,7 +280,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI TestAgentHooks(const BYTE* data,si
         local.config.outputs[0]={{0,0,2560,1440},{},0,TRUE,TRUE,L"HDR"};
         local.config.outputs[1]={{-1920,0,0,1080},{},1,FALSE,FALSE,L"SDR1"};
         local.config.outputs[2]={{2560,0,4480,1080},{},2,FALSE,FALSE,L"SDR2"};
-        shared=&local; ownerSequence=-1;testFailed=false;ZeroMemory(testVariants,sizeof(testVariants));
+        auto initial=local.config;ZeroMemory(&local.config,sizeof(local.config));
+        local.stats.appliedCurve=(LONG)TransferCurve::SRGB;UpdateIsolationConfig(local,initial);local.enabled=1;
+        shared=&local; ownerSequence=-1;testFailed=false;testFallback=TransferCurve::SRGB;ZeroMemory(testVariants,sizeof(testVariants));
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
         if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context)))return 1;
         ComPtr<ID3D11PixelShader> pixel;if(FAILED(device->CreatePixelShader(data,size,nullptr,&pixel)))return 2;
@@ -276,8 +296,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI TestAgentHooks(const BYTE* data,si
         if(MH_Initialize()!=MH_OK||MH_CreateHook((void*)TestRenderOriginal,(void*)DisplayRenderThunk,(void**)&displayOriginal)!=MH_OK||MH_CreateHook((void*)TestShaderOriginal,(void*)LinkedShaderThunk,(void**)&shaderOriginal)!=MH_OK||MH_CreateHook((void*)TestCommonOriginal,(void*)CommonShaderThunk,(void**)&commonOriginal)!=MH_OK||MH_EnableHook(MH_ALL_HOOKS)!=MH_OK)return 6;
         std::vector<BYTE> contexts[3];for(unsigned i=0;i<3;++i){contexts[i].resize(0x7800);auto r=local.config.outputs[i].bounds;float b[4]={(float)r.left,(float)r.top,(float)r.right,(float)r.bottom};memcpy(contexts[i].data()+DisplayRectOffset,b,sizeof(b));}
         RenderFn volatile render=TestRenderOriginal;
+        for(unsigned frame=0;frame<2;++frame)for(unsigned i=0;i<3;++i)render(contexts[i].data(),nullptr);
+        auto next=initial;next.curve=TransferCurve::Gamma24;UpdateIsolationConfig(local,next);
+        // Hold the creation lock to emulate another render thread preparing the new curve.
+        testFallback=TransferCurve::Gamma22;AcquireSRWLockExclusive(&shaderLock);
+        render(contexts[0].data(),nullptr);ReleaseSRWLockExclusive(&shaderLock);testFallback=TransferCurve::SRGB;
+        if(testFailed||AppliedIsolationCurve(local)!=TransferCurve::Gamma22)return 10;
+        render(contexts[0].data(),nullptr);
+        if(testFailed||AppliedIsolationCurve(local)!=TransferCurve::Gamma24)return 11;
         for(int mode:{0,1,2,0,3,2,1,0}){
-            local.configSequence+=2;local.config.curve=(TransferCurve)mode;
+            LONG sequence=local.configSequence;next.curve=(TransferCurve)mode;UpdateIsolationConfig(local,next);
+            if(local.configSequence!=sequence||local.stats.contextsMask!=7||!local.enabled)return 12;
             for(unsigned frame=0;frame<20;++frame)for(unsigned i=0;i<3;++i)render(contexts[i].data(),nullptr);
         }
         if(local.stats.variants!=3||!testVariants[0]||!testVariants[1]||!testVariants[2]||testVariants[0]==testVariants[1]||testVariants[0]==testVariants[2]||testVariants[1]==testVariants[2])return 8;

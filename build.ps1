@@ -1,4 +1,4 @@
-param([switch]$Test)
+param([switch]$Test, [switch]$SyncDist)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $vc = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat'
@@ -55,6 +55,8 @@ if errorlevel 1 exit /b 1
 %CXX% tests\info_window_tests.cpp build\tray_icon.obj %CORE_OBJECTS% /Febuild\info_window_tests.exe /Fobuild\info_window_tests.obj /link advapi32.lib user32.lib gdi32.lib shell32.lib bcrypt.lib
 if errorlevel 1 exit /b 1
 %CXX% tests\tray_preview.cpp build\tray_icon.obj %CORE_OBJECTS% /Febuild\tray_preview.exe /Fobuild\tray_preview.obj /link advapi32.lib user32.lib gdi32.lib bcrypt.lib
+if errorlevel 1 exit /b 1
+%CXX% tests\tray_state_tests.cpp build\tray_icon.obj %CORE_OBJECTS% /Febuild\tray_state_tests.exe /Fobuild\tray_state_tests.obj /link advapi32.lib user32.lib gdi32.lib shell32.lib bcrypt.lib
 exit /b %errorlevel%
 '@
 $compile = $compile.Replace('AGENT_FILE', $agentFile)
@@ -63,7 +65,7 @@ $buildMode = if ($Test) { 'test' } else { 'release' }
 & $env:ComSpec /d /c build\compile.cmd $buildMode
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 if ($Test) {
-    foreach ($testName in @('core_tests', 'isolation_tests', 'agent_selftest', 'tray_preview', 'info_window_tests')) {
+    foreach ($testName in @('core_tests', 'isolation_tests', 'agent_selftest', 'tray_preview', 'info_window_tests', 'tray_state_tests')) {
         & (Join-Path $PSScriptRoot "build\$testName.exe")
         if ($LASTEXITCODE -ne 0) { throw "$testName failed ($LASTEXITCODE)." }
     }
@@ -83,3 +85,11 @@ $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInv
 [IO.File]::WriteAllText($archive + '.sha256', $digest + '  SdrEotfPatcher-portable.zip' + "`r`n", [Text.Encoding]::ASCII)
 Write-Output "Package: $archive"
 Write-Output "Unpacked files: $package"
+if ($SyncDist) {
+    # Local test installation only; keep old versioned DLLs that DWM may still have loaded.
+    $testDist = Join-Path $PSScriptRoot 'dist'
+    if ((Get-Item -LiteralPath $testDist).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Test dist cannot be a link.' }
+    $syncFiles = @($packageFiles | Where-Object { $_ -ne 'SdrEotfPatcher.exe' }) + 'SdrEotfPatcher.exe'
+    foreach ($file in $syncFiles) { Copy-Item -LiteralPath (Join-Path $package $file) -Destination (Join-Path $testDist $file) -Force }
+    Write-Output "Local test files synchronized: $testDist"
+}

@@ -22,6 +22,14 @@
 
 ### Recovery and maintenance / 恢复与维护
 
+- Preserve verified output ownership when switching between conversion curves. Keep the prior cached variant available during shader preparation and report the confirmed active curve throughout the switch, avoiding an intermediate sRGB path or tray icon.
+
+  在转换曲线之间切换时保留已确认的输出归属；着色器准备期间继续使用已有变体，并持续显示已确认生效的曲线，避免中间短暂回到 sRGB 路径或图标。
+
+- Retry failed tray updates, recreate missing notification icons, and resync after display changes. Periodically refresh the icon so it recovers if Explorer loses an accepted update during HDR display reconnection.
+
+  托盘更新失败时自动重试，图标丢失时重新添加，并在显示配置变化后重新同步。定期刷新图标，避免 HDR 显示器重连时 Explorer 丢失已接受的更新，导致曲线生效后仍显示 sRGB。
+
 - Restore the original shader path and hook entry bytes when switching to sRGB or exiting, without restarting DWM. Keep the application running if restoration has not been confirmed.
 
   切换到 sRGB 或退出时恢复原始着色器路径和挂钩入口，不重启 DWM；尚未确认恢复时继续保留程序运行。

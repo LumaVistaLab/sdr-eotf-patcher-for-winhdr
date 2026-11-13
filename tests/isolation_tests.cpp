@@ -62,6 +62,22 @@ int main() {
         Check(!topology.Observe(empty,3300)&&topology.Observe(empty,4300)&&!ShouldUseGamma(empty,0,true,true),"No-monitor state enabled a variant");
         topology.Reset();Check(!topology.Observe(c,4400)&&topology.Observe(c,5400),"Reconnect after transient enumeration error did not stabilize");
 
+        IsolationShared switching={};switching.stats.appliedCurve=(LONG)TransferCurve::SRGB;
+        UpdateIsolationConfig(switching,c);LONG sequence=switching.configSequence;
+        switching.enabled=1;switching.stats.contextsMask=7;
+        switching.stats.appliedSequence=sequence;switching.stats.appliedCurve=(LONG)TransferCurve::Gamma22;
+        auto next=c;next.curve=TransferCurve::Gamma24;UpdateIsolationConfig(switching,next);
+        IsolationConfig snapshot={};LONG observed=0;
+        Check(ReadIsolationConfig(switching,snapshot,observed)&&snapshot.curve==TransferCurve::Gamma24&&observed==sequence,
+            "Curve request invalidated the output snapshot");
+        Check(switching.enabled&&switching.stats.contextsMask==7&&AppliedIsolationCurve(switching)==TransferCurve::Gamma22&&
+            switching.fallbackCurve==(LONG)TransferCurve::Gamma22,"Curve switch interrupted conversion or discarded the confirmed curve");
+        switching.stats.appliedCurve=(LONG)TransferCurve::Gamma24;
+        Check(AppliedIsolationCurve(switching)==TransferCurve::Gamma24,"New curve hit was not reported");
+        next.outputs[0].selected=FALSE;UpdateIsolationConfig(switching,next);
+        Check(!switching.enabled&&switching.configSequence!=sequence&&AppliedIsolationCurve(switching)==TransferCurve::SRGB,
+            "Target change reused a stale curve or output mapping");
+
         auto inventory = InspectShaders(ReadFileBytes(SystemDwmPath()));
         auto pixel = LinkSDR(inventory.containers[0]); std::array<Bytes,3> variants;
         ComPtr<ID3DBlob> asmCode;
@@ -124,7 +140,7 @@ int main() {
         ctx->ClearState(); ctx->Flush();
         std::cout << "PASS: mixed-monitor identity mapping; both SDR outputs keep original shader; unverified/mirrored outputs blocked.\n";
         std::cout << "PASS: Gamma 2.2, Gamma 2.4, Rec.709 and sRGB WARP GPU readback, including breakpoints and premultiplied alpha; native HDR rejected in every mode.\n";
-        std::cout << "PASS: hotplug topology stability, SDR disconnect, all HDR removed, no monitors, transient enumeration reset and reconnect.\n";
+        std::cout << "PASS: continuous curve requests and confirmed active curve; target-change invalidation; hotplug topology stability, SDR disconnect, all HDR removed, no monitors, transient enumeration reset and reconnect.\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << "\n"; return 1; }
 }

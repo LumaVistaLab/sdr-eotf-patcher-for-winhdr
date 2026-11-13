@@ -43,6 +43,8 @@ Here, `V` is the normalized SDR input and `L` is the linear value. Rec.709 uses 
 
 The tray icon shows the active curve in green after an actual shader hit. The original path and waiting states use a gray `sRGB` icon. Hover over the icon for the current state or an error. “状态与说明” (Status and information) shows the current display list and feature descriptions in a native Windows message box, using system sizing rules and the information sound.
 
+Switching between Gamma 2.2, Gamma 2.4, and Rec.709 on the same target preserves the verified output mapping. The previous curve stays available while the new shader variant is prepared, and the tray changes directly to the new mode after a confirmed hit.
+
 The application sends no automatic notifications and writes no persistent runtime logs. Opening the information box again replaces the existing one. While open, it refreshes after display configuration settles; closing it manually prevents display changes from reopening it.
 
 ## Display Changes and Recovery
@@ -114,7 +116,9 @@ To compile and run all checks:
 .\build.ps1 -Test
 ```
 
-The five check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, and the native information-box lifecycle. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
+The six check programs cover read-only shader enumeration and rejection of damaged input, WARP GPU readback for all four curves, simulated display isolation, actual x64 wrappers and in-process hook restoration, tray-text centering, the native information-box lifecycle, and tray recovery after display reconnection or failed shell updates. The WARP debug-device check requires the Direct3D debug layer. These checks do not install hooks in the system DWM.
+
+Use `.\build.ps1 -Test -SyncDist` to also synchronize the latest executable, matching helper, and support files to `dist/` for local testing. Exit the existing test instance before synchronizing. `dist/` stays excluded from Git; its existing contents are never used as release-package input. The package uses only the fixed manifest from `build/package/`.
 
 Unpacked build output is placed in `build/package/`. Delivery files are `dist/SdrEotfPatcher-portable.zip` and its adjacent `.sha256` file. A fixed manifest packages the executable, one matching helper DLL, the filename record, the recovery script, both English and Simplified Chinese documentation, bilingual release notes, and license notices. Test executables, diagnostic reports, symbol caches, and linker output are excluded.
 

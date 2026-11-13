@@ -3,7 +3,7 @@
 
 namespace eotf {
 constexpr unsigned MaxOutputs = 8;
-constexpr DWORD IsolationProtocol = 0x00030002;
+constexpr DWORD IsolationProtocol = 0x00030003;
 struct OutputConfig {
     RECT bounds;
     LUID adapter;
@@ -38,17 +38,21 @@ struct IsolationStats {
     volatile LONG64 candidates[MaxOutputs];
     volatile LONG64 variants, unscoped;
     volatile LONG contextsMask, mappingConflict;
-    volatile LONG appliedSequence;
+    volatile LONG appliedSequence, appliedCurve;
 };
 struct IsolationShared {
     DWORD protocol;
     volatile LONG enabled, stop, ready, state, configSequence;
-    volatile LONG inspect;
+    volatile LONG inspect, requestedCurve, fallbackCurve;
     volatile LONG64 heartbeat;
     IsolationConfig config;
     IsolationStats stats;
     wchar_t detail[512];
 };
+// Curve requests do not invalidate an unchanged output mapping.
+void UpdateIsolationConfig(IsolationShared& shared, const IsolationConfig& config);
+bool ReadIsolationConfig(IsolationShared& shared, IsolationConfig& config, LONG& sequence);
+TransferCurve AppliedIsolationCurve(IsolationShared& shared);
 struct AgentStart {
     wchar_t channel[128];
 };
