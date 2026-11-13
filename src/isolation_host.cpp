@@ -1,4 +1,5 @@
 #include "isolation.h"
+#include "isolation_status.h"
 #include "display_refresh.h"
 #include "restoration_cover.h"
 #include "isolation_profile.h"
@@ -104,17 +105,17 @@ struct AgentReadPermission {
     }
     ~AgentReadPermission(){if(changed)SetNamedSecurityInfoW((LPWSTR)path.c_str(),SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,original,nullptr);if(descriptor)LocalFree(descriptor);}
 };
-static void AllowAgentMapping(HANDLE process,HANDLE mapping) {
-    HANDLE raw=nullptr;if(!OpenProcessToken(process,TOKEN_QUERY,&raw))throw Error(WinError("Query agent mapping account"));Handle token(raw);
+static void AllowAgentObject(HANDLE process,HANDLE object,DWORD rights) {
+    HANDLE raw=nullptr;if(!OpenProcessToken(process,TOKEN_QUERY,&raw))throw Error(WinError("Query agent channel account"));Handle token(raw);
     DWORD n=0;GetTokenInformation(token,TokenUser,nullptr,0,&n);std::vector<BYTE> data(n);
-    if(!GetTokenInformation(token,TokenUser,data.data(),n,&n))throw Error(WinError("Read mapping account SID"));
+    if(!GetTokenInformation(token,TokenUser,data.data(),n,&n))throw Error(WinError("Read channel account SID"));
     PACL original=nullptr,updated=nullptr;PSECURITY_DESCRIPTOR descriptor=nullptr;
-    DWORD rc=GetSecurityInfo(mapping,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&original,nullptr,&descriptor);
-    if(rc)throw Error(WinError("Read new mapping ACL",rc));
-    EXPLICIT_ACCESSW access={};access.grfAccessPermissions=SECTION_MAP_READ|SECTION_MAP_WRITE;access.grfAccessMode=GRANT_ACCESS;BuildTrusteeWithSidW(&access.Trustee,((TOKEN_USER*)data.data())->User.Sid);
+    DWORD rc=GetSecurityInfo(object,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&original,nullptr,&descriptor);
+    if(rc)throw Error(WinError("Read new channel ACL",rc));
+    EXPLICIT_ACCESSW access={};access.grfAccessPermissions=rights;access.grfAccessMode=GRANT_ACCESS;BuildTrusteeWithSidW(&access.Trustee,((TOKEN_USER*)data.data())->User.Sid);
     rc=SetEntriesInAclW(1,&access,original,&updated);
-    if(!rc)rc=SetSecurityInfo(mapping,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,updated,nullptr);
-    if(updated)LocalFree(updated);LocalFree(descriptor);if(rc)throw Error(WinError("Allow DWM mapping read/write",rc));
+    if(!rc)rc=SetSecurityInfo(object,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,updated,nullptr);
+    if(updated)LocalFree(updated);LocalFree(descriptor);if(rc)throw Error(WinError("Allow DWM channel access",rc));
 }
 static bool SameProcess(const Shared& s) {
     Handle p(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,s.dwmPid));
@@ -157,7 +158,7 @@ struct RemoteBuffer {
     ~RemoteBuffer(){if(address)VirtualFreeEx(process,address,0,MEM_RELEASE);}
 };
 struct AgentSession {
-    Shared& owner;Handle process,mapping,thread;IsolationShared* state=nullptr;uintptr_t base=0;
+    Shared& owner;Handle process,mapping,thread,changed;IsolationShared* state=nullptr;uintptr_t base=0;
     CompositionRefreshPlan refresh;
     explicit AgentSession(Shared& s):owner(s){}
     ~AgentSession(){if(state){InterlockedExchange(&state->enabled,0);InterlockedExchange(&state->stop,1);if(thread.h)WaitForSingleObject(thread,3000);UnmapViewOfFile(state);}}
@@ -168,6 +169,10 @@ struct AgentSession {
         if(state&&refresh.Next(state->configSequence,(TransferCurve)state->requestedCurve,
             state->enabled!=0,AppliedIsolationCurve(*state),GetTickCount64()))RefreshComposedDesktop();
     }
+    void Synchronize() {
+        InterlockedExchange64(&state->heartbeat,(LONG64)GetTickCount64());
+        SynchronizeIsolationStatus(owner,*state,[this](){Refresh();});
+    }
     void Start(const IsolationConfig& config) {
         if(!MatchesIsolationProfile()) throw Error("Installed dwmcore.dll has no exact isolation profile; nothing was injected");
         EnableDebugPrivilege();DWORD pid=FindDwm();if(!pid)throw Error("No compositor in this session");
@@ -175,7 +180,10 @@ struct AgentSession {
         owner.dwmPid=pid;owner.dwmCreated=CreationTime(process);
         swprintf_s(owner.isolationChannel,L"Local\\SDREotf.Isolated.%lu.%lu.%llu",GetCurrentProcessId(),pid,GetTickCount64());
         mapping=Handle(CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(IsolationShared),owner.isolationChannel));if(!mapping.h)throw Error(WinError("Create isolation channel"));
-        AllowAgentMapping(process,mapping);
+        AllowAgentObject(process,mapping,SECTION_MAP_READ|SECTION_MAP_WRITE);
+        changed=Handle(CreateEventW(nullptr,FALSE,FALSE,IsolationStateEventName(owner.isolationChannel).c_str()));
+        if(!changed.h)throw Error(WinError("Create isolation state event"));
+        AllowAgentObject(process,changed,EVENT_MODIFY_STATE);
         state=(IsolationShared*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(IsolationShared));if(!state)throw Error(WinError("Map isolation channel"));
         ZeroMemory(state,sizeof(*state));state->protocol=IsolationProtocol;
         state->stats.appliedCurve=(LONG)TransferCurve::SRGB;
@@ -217,9 +225,6 @@ struct AgentSession {
     }
     bool Alive() const{return process.h&&WaitForSingleObject(process,0)==WAIT_TIMEOUT&&thread.h&&WaitForSingleObject(thread,0)==WAIT_TIMEOUT;}
 };
-static void PublishIsolation(Shared& s,Status status,const std::wstring& message,TransferCurve curve=TransferCurve::SRGB) {
-    wcsncpy_s(s.detail,message.c_str(),_TRUNCATE);InterlockedExchange(&s.activeCurve,(LONG)curve);MemoryBarrier();InterlockedExchange(&s.status,status);
-}
 static void PublishOutputs(Shared& s,const IsolationConfig& config) {
     s.outputCount=config.count;s.selectedOutput=-1;
     for(unsigned i=0;i<config.count;++i){s.outputHdr[i]=config.outputs[i].hdr;wcsncpy_s(s.outputNames[i],config.outputs[i].name,_TRUNCATE);if(config.outputs[i].selected)s.selectedOutput=(LONG)i;}
@@ -227,12 +232,18 @@ static void PublishOutputs(Shared& s,const IsolationConfig& config) {
 int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
     Command wanted=SRGB; bool chosen=false;LUID adapter={};UINT32 target=0;
     std::unique_ptr<AgentSession> agent;TopologyStability topology;
-    PublishIsolation(s,Original,L"sRGB · 所有输出保持原始路径");SetEvent(response);HANDLE waits[]={parent,request};
+    PublishIsolation(s,Original,L"sRGB · 所有输出保持原始路径");SetEvent(response);
     for(;;){
-        DWORD wait=WaitForMultipleObjects(2,waits,FALSE,agent&&agent->refresh.Pending()?100:1000);auto cmd=(Command)InterlockedExchange(&s.command,None);
+        HANDLE waits[]={parent,request,agent?agent->changed.h:nullptr};
+        DWORD wait=WaitForMultipleObjects(agent?3:2,waits,FALSE,agent&&agent->refresh.Pending()?100:1000);auto cmd=(Command)InterlockedExchange(&s.command,None);
         try{
             if(wait==WAIT_OBJECT_0||cmd==Stop){if(agent)agent->Stop();PublishIsolation(s,Stopped,L"已恢复原始着色器，未重启 DWM");SetEvent(response);return 0;}
             if(wait==WAIT_FAILED)throw Error(WinError("Isolated worker wait"));
+            if(wait==WAIT_OBJECT_0+2&&cmd==None){
+                if(!agent->Alive())throw Error("Compositor or isolation agent exited; automatic reapplication stopped");
+                // Shader/mapping notifications need no display enumeration.
+                agent->Synchronize();SetEvent(response);continue;
+            }
             if(CurveCommand(cmd))wanted=cmd;
             IsolationConfig config=OutputConfiguration();config.curve=CommandCurve(wanted);
             bool changed=!topology.observed||!SameOutputTopology(topology.previous,config);
@@ -251,15 +262,7 @@ int IsolatedWorker(Shared& s,HANDLE parent,HANDLE request,HANDLE response) {
             }else{
                 if(agent&&!agent->Alive()){agent.reset();InterlockedExchange(&s.dirty,0);wanted=SRGB;throw Error("Compositor or isolation agent exited; automatic reapplication stopped");}
                 if(!agent){PublishIsolation(s,Working,L"正在安装按显示器隔离入口…");agent=std::make_unique<AgentSession>(s);agent->Start(config);}
-                agent->Update(config);auto& a=*agent->state;InterlockedExchange64(&a.heartbeat,(LONG64)GetTickCount64());
-                if(a.state==3)throw Error(Utf8(a.detail));
-                if(a.stats.mappingConflict){InterlockedExchange(&a.enabled,0);PublishIsolation(s,BlockedMixedOutputs,L"检测到显示器上下文冲突，所有输出保持原始路径");}
-                else if(a.stats.contextsMask!=((1L<<config.count)-1)){InterlockedExchange(&a.enabled,0);PublishIsolation(s,Working,L"正在核对显示器归属 · "+std::to_wstring(a.stats.contextsMask)+L" / "+std::to_wstring((1L<<config.count)-1));}
-                else{InterlockedExchange(&a.enabled,1);auto active=AppliedIsolationCurve(a);bool hit=active!=TransferCurve::SRGB;
-                    std::wstring detail=hit?std::wstring(CurveName(active))+L" · 仅 "+std::wstring(config.outputs[s.selectedOutput].name)+L" · SDR 副屏旁路":L"显示器隔离已确认 · 等待 SDR 着色器命中";
-                    if(hit&&active!=config.curve)detail+=L" · 正在切换到 "+std::wstring(CurveName(config.curve));
-                    PublishIsolation(s,hit?Patched:Working,detail,active);}
-                agent->Refresh();
+                agent->Update(config);agent->Synchronize();
             }
         }catch(const DisplayTransition&){
             topology.Reset();s.outputCount=0;s.selectedOutput=-1;

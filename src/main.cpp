@@ -10,6 +10,7 @@ using namespace eotf;
 static const wchar_t* ClassName = L"LumaVista.SdrEotfPatcher.v1";
 static constexpr const wchar_t* ProductName = L"SDR EOTF Patcher for Windows HDR";
 static constexpr UINT TrayMessage = WM_APP + 1, ControlMessage = WM_APP + 2, StateMessage = WM_APP + 3;
+static constexpr UINT StateChangedMessage = InfoWindow::RequestMessage + 1;
 static constexpr UINT IdGamma = 100, IdSRGB = 101, IdInfo = 102, IdExit = 103;
 static constexpr UINT IdGamma24 = 104, IdRec709 = 105;
 static constexpr UINT IdOutputBase = 1000;
@@ -25,9 +26,21 @@ static bool Admin() {
 
 struct Channel {
     Handle mapping, request, response, parent, child;
+    HANDLE notification = nullptr;
     Shared* s = nullptr;
-    ~Channel() { if (s) UnmapViewOfFile(s); }
+    void StopWatching() {
+        if (notification) { UnregisterWaitEx(notification, INVALID_HANDLE_VALUE); notification = nullptr; }
+    }
+    ~Channel() { StopWatching(); if (s) UnmapViewOfFile(s); }
+    void Watch(HWND window) {
+        StopWatching();
+        if (!RegisterWaitForSingleObject(&notification, response,
+            [](void* context, BOOLEAN) { PostMessageW((HWND)context, StateChangedMessage, 0, 0); },
+            window, INFINITE, WT_EXECUTEDEFAULT)) throw Error(WinError("Watch guardian state"));
+    }
     void Start() {
+        // The readiness wait must be the only consumer until the child is ready.
+        StopWatching();
         SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
         if (!mapping.h) {
             mapping = Handle(CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(Shared), nullptr));
@@ -75,6 +88,7 @@ struct Tray {
     HWND window = nullptr;
     NOTIFYICONDATAW icon = {};
     HICON curveIcons[4] = {};
+    HICON sdrIcon = nullptr, lastIcon = nullptr;
     UINT taskbarCreated = 0;
     Command selected = Gamma22;
     LONG lastStatus = -1;
@@ -85,10 +99,17 @@ struct Tray {
     InfoWindow info;
     bool closing = false;
 
+    bool SdrDisplayMode() const {
+        if(!channel.s)return false;
+        const unsigned count=channel.s->outputCount;
+        if(!count||count>MaxOutputs)return false;
+        for(unsigned i=0;i<count;++i)if(channel.s->outputHdr[i])return false;
+        return true;
+    }
     void AddIcon() {
         icon = {}; icon.cbSize = sizeof(icon); icon.hWnd = window; icon.uID = 1;
         icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP; icon.uCallbackMessage = TrayMessage;
-        icon.hIcon = curveIcons[(int)TransferCurve::SRGB]; wcscpy_s(icon.szTip, L"SDR EOTF · 初始化中");
+        icon.hIcon = SdrDisplayMode()?sdrIcon:curveIcons[(int)TransferCurve::SRGB]; wcscpy_s(icon.szTip, L"SDR EOTF · 初始化中");
         if (!Shell_NotifyIconW(NIM_ADD, &icon)) throw Error("Notification icon could not be added");
         icon.uVersion = NOTIFYICON_VERSION_4; Shell_NotifyIconW(NIM_SETVERSION, &icon); lastStatus = -1; Refresh();
     }
@@ -103,10 +124,11 @@ struct Tray {
         std::wstring detail = channel.s->detail;
         auto curve = state == Patched ? (TransferCurve)InterlockedCompareExchange(&channel.s->activeCurve,0,0) : TransferCurve::SRGB;
         if (!ValidCurve(curve)) curve = TransferCurve::SRGB;
-        bool changed = state != lastStatus || detail != lastDetail || curve != lastCurve;
+        HICON nextIcon=curve==TransferCurve::SRGB&&SdrDisplayMode()?sdrIcon:curveIcons[(int)curve];
+        bool changed = state != lastStatus || detail != lastDetail || curve != lastCurve || nextIcon != lastIcon;
         // Explorer can lose an accepted update while rebuilding the notification area.
         if (changed || now >= nextIconRefresh) {
-            icon.uFlags = NIF_ICON | NIF_TIP; icon.hIcon = curveIcons[(int)curve];
+            icon.uFlags = NIF_ICON | NIF_TIP; icon.hIcon = nextIcon;
             if (changed) { std::wstring tip = L"SDR EOTF · " + detail; wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE); }
             if (!Shell_NotifyIconW(NIM_MODIFY, &icon)) {
                 // A display change may also recreate the tray without TaskbarCreated.
@@ -115,13 +137,13 @@ struct Tray {
                 icon.uVersion = NOTIFYICON_VERSION_4; Shell_NotifyIconW(NIM_SETVERSION, &icon);
             }
             // Cache only accepted updates so a failed call is retried on the next poll.
-            lastStatus = state; lastDetail = detail; lastCurve = curve;
+            lastStatus = state; lastDetail = detail; lastCurve = curve; lastIcon = nextIcon;
             nextIconRefresh = now + IconRefreshInterval;
         }
     }
     void Set(Command cmd) {
         if (closing) return;
-        if (!channel.Alive()) { if (channel.s->dirty) RestoreIsolated(*channel.s); channel.Start(); }
+        if (!channel.Alive()) { if (channel.s->dirty) RestoreIsolated(*channel.s); channel.Start(); channel.Watch(window); }
         if (CurveCommand(cmd)) selected = cmd;
         channel.Send(cmd);lastError.clear();lastStatus=-1;
     }
@@ -186,7 +208,7 @@ struct Tray {
     }
     void Poll() {
         if (!channel.Alive() && !closing) {
-            try { RestoreIsolated(*channel.s); channel.Start(); selected = SRGB;lastError.clear(); }
+            try { RestoreIsolated(*channel.s); channel.Start(); channel.Watch(window); selected = SRGB;lastError.clear(); }
             catch (const std::exception& e) { KillTimer(window, TimerId);SetError(Wide(e.what())); }
         }
         Refresh();
@@ -203,7 +225,9 @@ struct Tray {
         Shell_NotifyIconW(NIM_DELETE, &icon); DestroyWindow(window);
     }
     ~Tray() {
+        channel.StopWatching();
         for (auto handle : curveIcons) if (handle) DestroyIcon(handle);
+        if(sdrIcon)DestroyIcon(sdrIcon);
         // Closing our parent handle signals the surviving child only when this process actually exits.
     }
 };
@@ -222,13 +246,14 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == Stop) app->Close(); else if (CurveCommand((Command)wp) || (wp>=100&&wp<100+MaxOutputs)) app->Set((Command)wp); return 1;
         }
         if (msg == StateMessage) return app->channel.s ? InterlockedCompareExchange(&app->channel.s->status, 0, 0) : Starting;
+        if (msg == StateChangedMessage) { if (!app->closing) app->Refresh(); return 0; }
         if (msg == InfoWindow::RequestMessage) { app->info.Dispatch();return 0; }
-        if (msg == WM_DISPLAYCHANGE) { app->lastStatus = -1;app->info.DisplayChanged();return 0; }
+        if (msg == WM_DISPLAYCHANGE) { app->lastStatus = -1;app->Refresh();app->info.DisplayChanged();return 0; }
         if (msg == WM_TIMER) { if(wp==InfoWindow::Timer)app->info.Tick();else if(wp==TimerId)app->Poll(); return 0; }
         if (msg == WM_CLOSE) { app->Close(); return 0; }
         if (msg == WM_QUERYENDSESSION) return TRUE;
         if (msg == WM_ENDSESSION && wp) { app->channel.StopAndWait(); return 0; }
-        if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+        if (msg == WM_DESTROY) { app->channel.StopWatching(); PostQuitMessage(0); return 0; }
     } catch (const std::exception& e) { app->SetError(Wide(e.what())); }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -240,12 +265,13 @@ static int RunTray(bool startSrgb) {
     app.channel.Start(); // No patch until the independent restoration guardian is ready.
     const int iconSize = std::max(16,GetSystemMetrics(SM_CXSMICON));
     for (int i=0;i<4;++i) app.curveIcons[i] = MakeTrayIcon((TransferCurve)i,iconSize);
+    app.sdrIcon = MakeSdrTrayIcon(iconSize);
     app.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW wc = {}; wc.cbSize = sizeof(wc); wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = ClassName; wc.lpfnWndProc = WindowProc;
     if (!RegisterClassExW(&wc)) throw Error(WinError("Register tray window"));
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, ClassName, ProductName, WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, &app);
     if (!window) throw Error(WinError("Create tray window"));
-    app.AddIcon(); SetTimer(window, TimerId, 500, nullptr);
+    app.AddIcon(); app.channel.Watch(window); SetTimer(window, TimerId, 500, nullptr);
     app.channel.Send(app.selected);
     MSG msg; int rc;
     while ((rc = GetMessageW(&msg, nullptr, 0, 0)) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }

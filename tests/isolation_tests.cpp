@@ -1,4 +1,5 @@
 #include "../src/isolation.h"
+#include "../src/isolation_status.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
@@ -72,8 +73,25 @@ int main() {
             "Curve request invalidated the output snapshot");
         Check(switching.enabled&&switching.stats.contextsMask==7&&AppliedIsolationCurve(switching)==TransferCurve::Gamma22&&
             switching.fallbackCurve==(LONG)TransferCurve::Gamma22,"Curve switch interrupted conversion or discarded the confirmed curve");
-        switching.stats.appliedCurve=(LONG)TransferCurve::Gamma24;
-        Check(AppliedIsolationCurve(switching)==TransferCurve::Gamma24,"New curve hit was not reported");
+        Shared published={};published.selectedOutput=0;
+        SynchronizeIsolationStatus(published,switching,[](){});
+        Check(published.status==Patched&&published.activeCurve==(LONG)TransferCurve::Gamma22,
+            "Pending switch published the unconfirmed curve");
+        SynchronizeIsolationStatus(published,switching,[&](){
+            Check(switching.enabled!=0,"Composition ran before conversion was armed");
+            switching.stats.appliedCurve=(LONG)TransferCurve::Gamma24;
+        });
+        Check(published.status==Patched&&published.activeCurve==(LONG)TransferCurve::Gamma24&&
+            std::wstring(published.detail).find(L"正在切换")==std::wstring::npos,
+            "Composition-confirmed curve was not published in the same iteration");
+        SynchronizeIsolationStatus(published,switching,[&](){switching.stats.mappingConflict=1;});
+        Check(!switching.enabled&&published.status==BlockedMixedOutputs&&published.activeCurve==(LONG)TransferCurve::SRGB,
+            "Conflict during composition published an active curve");
+        switching.stats.mappingConflict=0;
+        bool failed=false;
+        try{SynchronizeIsolationStatus(published,switching,[&](){switching.state=3;wcscpy_s(switching.detail,L"Simulated shader failure");});}
+        catch(const Error&){failed=true;}
+        Check(failed,"Shader failure during composition was published as a successful curve");switching.state=1;
         next.outputs[0].selected=FALSE;UpdateIsolationConfig(switching,next);
         Check(!switching.enabled&&switching.configSequence!=sequence&&AppliedIsolationCurve(switching)==TransferCurve::SRGB,
             "Target change reused a stale curve or output mapping");

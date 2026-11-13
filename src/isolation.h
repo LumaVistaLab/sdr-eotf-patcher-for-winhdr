@@ -56,6 +56,7 @@ TransferCurve AppliedIsolationCurve(IsolationShared& shared);
 struct AgentStart {
     wchar_t channel[128];
 };
+inline std::wstring IsolationStateEventName(const wchar_t* channel) { return std::wstring(channel) + L".Changed"; }
 // Exact rectangle identity, including desktop origin. Never match by resolution alone.
 int MatchOutput(const IsolationConfig& config, const float bounds[4]);
 bool ValidOutputConfig(const IsolationConfig& config);

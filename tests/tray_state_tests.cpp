@@ -38,6 +38,17 @@ static void Require(bool condition, const char* message) { if (!condition) throw
 static void State(Shared& shared, Status status, TransferCurve curve, const wchar_t* detail) {
     shared.status = status; shared.activeCurve = (LONG)curve; wcscpy_s(shared.detail, detail);
 }
+static void Pump() {
+    MSG message;
+    while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessageW(&message);}
+}
+static void AwaitIcon(HICON expected) {
+    auto end=GetTickCount64()+2000;
+    while(shell.shown!=expected&&GetTickCount64()<end){
+        MsgWaitForMultipleObjectsEx(0,nullptr,50,QS_ALLINPUT,MWMO_INPUTAVAILABLE);Pump();
+    }
+    Require(shell.shown==expected,"State event did not update the tray without a polling timer");
+}
 struct TestTray {
     Shared shared = {};
     Tray app;
@@ -45,6 +56,8 @@ struct TestTray {
         shell = {};
         app.channel.s = &shared;
         for (int mode = 0; mode < 4; ++mode) app.curveIcons[mode] = MakeTrayIcon((TransferCurve)mode, 16);
+        app.sdrIcon=MakeSdrTrayIcon(16);
+        shared.outputCount=2;shared.outputHdr[0]=TRUE;
         WNDCLASSW cls = {}; cls.hInstance = GetModuleHandleW(nullptr); cls.lpfnWndProc = WindowProc;
         cls.lpszClassName = L"SDREotf.Tray.StateTest";
         Require(RegisterClassW(&cls) != 0, "Register tray test window");
@@ -60,22 +73,25 @@ int main() {
     try {
         TestTray test; auto& app = test.app; auto& shared = test.shared;
         auto srgb = app.curveIcons[(int)TransferCurve::SRGB];
+        auto sdr = app.sdrIcon;
         auto gamma = app.curveIcons[(int)TransferCurve::Gamma22];
         Require(shell.shown == gamma, "Initial applied curve did not reach the tray");
+        shared.outputHdr[0]=FALSE;
         State(shared, WaitingHDR, TransferCurve::SRGB, L"Waiting for HDR target"); app.Refresh();
-        Require(shell.shown == srgb, "Removing all HDR outputs did not show the original path");
+        Require(shell.shown == sdr, "SDR display mode did not show the SDR icon");
+        shared.outputHdr[0]=TRUE;
         State(shared, Patched, TransferCurve::Gamma22, L"Gamma 2.2 active");
         shell.failModify = 1; shell.failAdd = 1; app.Refresh();
-        Require(shell.shown == srgb && app.lastStatus != Patched,
+        Require(shell.shown == sdr && app.lastStatus != Patched,
             "Failed reconnect update was cached as displayed");
         app.Refresh();
         Require(shell.shown == gamma && shell.tip == L"SDR EOTF · Gamma 2.2 active",
             "Unchanged applied state did not retry after the shell recovered");
         shell.shown = srgb;
-        SendMessageW(app.window, WM_DISPLAYCHANGE, 32, 0); app.Refresh();
+        SendMessageW(app.window, WM_DISPLAYCHANGE, 32, 0);
         Require(shell.shown == gamma, "Display change did not resync an unchanged curve");
         shell.present = false;
-        SendMessageW(app.window, WM_DISPLAYCHANGE, 32, 0); app.Refresh();
+        SendMessageW(app.window, WM_DISPLAYCHANGE, 32, 0);
         Require(shell.present && shell.shown == gamma && shell.versions >= 2,
             "Missing notification icon was not recreated with its callback version");
         shell.present = false;
@@ -104,7 +120,37 @@ int main() {
         }
         State(shared, Patched, (TransferCurve)99, L"Invalid curve"); app.Refresh();
         Require(shell.shown == srgb, "Invalid active curve was not guarded");
-        std::cout << "PASS: HDR reconnect notification retry, display-change resync, missing icon recovery, Explorer restart, periodic repair and curve/status icons.\n";
+        State(shared,Original,TransferCurve::SRGB,L"sRGB active");app.Refresh();
+        Require(shell.shown==srgb,"HDR original path lost its sRGB icon");
+        // HDR mode can change without changing the curve, status or detail.
+        shared.outputHdr[0]=FALSE;shell.failModify=1;shell.failAdd=1;app.Refresh();
+        Require(shell.shown==srgb&&app.lastIcon==srgb,"Failed SDR icon update was cached as displayed");
+        app.Refresh();Require(shell.shown==sdr,"SDR mode change did not retry without a curve/status change");
+        shared.outputHdr[1]=TRUE;app.Refresh();
+        Require(shell.shown==srgb,"Mixed HDR/SDR desktop replaced the HDR sRGB label");
+        shared.outputHdr[1]=FALSE;app.Refresh();Require(shell.shown==sdr,"Returning to all-SDR outputs kept sRGB");
+        shared.outputCount=0;app.Refresh();Require(shell.shown==srgb,"Unknown display mode was labeled as confirmed SDR");
+        shared.outputCount=2;shared.outputHdr[0]=TRUE;app.Refresh();
+        // No WM_TIMER is installed in this test. Only the worker's auto-reset
+        // event and ordinary message dispatch can deliver these changes.
+        app.channel.response=Handle(CreateEventW(nullptr,FALSE,FALSE,nullptr));
+        Require(app.channel.response.h!=nullptr,"Create state notification test event");
+        State(shared,Patched,TransferCurve::Gamma24,L"Gamma 2.4 active");
+        SetEvent(app.channel.response);app.channel.Watch(app.window);
+        AwaitIcon(app.curveIcons[(int)TransferCurve::Gamma24]);
+        for(auto curve:{TransferCurve::Gamma22,TransferCurve::Rec709,TransferCurve::Gamma24}){
+            State(shared,Patched,curve,CurveName(curve));SetEvent(app.channel.response);
+            AwaitIcon(app.curveIcons[(int)curve]);
+        }
+        State(shared,Original,TransferCurve::SRGB,L"sRGB active");SetEvent(app.channel.response);AwaitIcon(srgb);
+        shared.outputHdr[0]=FALSE;SetEvent(app.channel.response);AwaitIcon(sdr);
+        shared.outputHdr[0]=TRUE;SetEvent(app.channel.response);AwaitIcon(srgb);
+        app.channel.StopWatching();Pump();
+        State(shared,Patched,TransferCurve::Gamma22,L"Gamma 2.2 active");SetEvent(app.channel.response);
+        Require(WaitForSingleObject(app.channel.response,0)==WAIT_OBJECT_0,"Stopped observer still consumed state events");
+        Pump();Require(shell.shown==srgb,"Stopped observer still updated the tray");
+        app.channel.Watch(app.window);SetEvent(app.channel.response);AwaitIcon(gamma);
+        std::cout << "PASS: SDR display label, preserved HDR sRGB and mixed-output labels, unchanged-state HDR toggles and failed-update retry; event-driven curve/restoration updates without polling, observer restart/cleanup, HDR reconnect notification retry, immediate display-change resync, missing icon recovery, Explorer restart, periodic repair and curve/status icons.\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }

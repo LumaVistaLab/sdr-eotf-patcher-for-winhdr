@@ -3,8 +3,8 @@
 #include <cstring>
 
 namespace eotf {
-TrayRaster RasterizeTrayIcon(TransferCurve curve, int size) {
-    if (!ValidCurve(curve) || size < 16 || size > 128) throw Error("Invalid tray icon parameters");
+static TrayRaster RasterizeLabel(const wchar_t* label, bool original, int size) {
+    if (size < 16 || size > 128) throw Error("Invalid tray icon parameters");
     // Render coverage at 8x, then center the visible ink rather than the font's line box.
     const int scale = 8, canvas = size * scale * 3, border = scale * 2;
     HDC dc = CreateCompatibleDC(nullptr); if (!dc) throw Error("Create icon DC failed");
@@ -15,7 +15,7 @@ TrayRaster RasterizeTrayIcon(TransferCurve curve, int size) {
     HFONT font = CreateFontW(-size*scale*3/4,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     auto previousFont = SelectObject(dc,font); SetTextColor(dc,RGB(255,255,255)); SetBkMode(dc,TRANSPARENT);
-    TextOutW(dc,border,border,CurveLabel(curve),(int)wcslen(CurveLabel(curve))); GdiFlush();
+    TextOutW(dc,border,border,label,(int)wcslen(label)); GdiFlush();
     const auto source = (const BYTE*)raw;
     RECT bounds{canvas,canvas,0,0};
     for (int y=0;y<canvas;++y) for (int x=0;x<canvas;++x) if (source[((size_t)y*canvas+x)*4]) {
@@ -24,12 +24,12 @@ TrayRaster RasterizeTrayIcon(TransferCurve curve, int size) {
     }
     const int width=bounds.right-bounds.left,height=bounds.bottom-bounds.top;
     if (width<=0||height<=0) { SelectObject(dc,previousFont);DeleteObject(font);SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);throw Error("Empty icon text"); }
-    // Fit sRGB's four letters without shrinking the other labels unnecessarily.
+    // Fit each label without shrinking shorter labels unnecessarily.
     double factor=std::min(1.0,std::min((double)(size-2)*scale/width,(double)(size-2)*scale/height));
     const int w=std::max(1,(int)(width*factor/scale+.5)),h=std::max(1,(int)(height*factor/scale+.5));
     const int left=(size-w)/2,top=(size-h)/2;
     TrayRaster raster{size,Bytes((size_t)size*size*4),{left,top,left+w,top+h}};
-    const BYTE background[3] = {(BYTE)(curve==TransferCurve::SRGB?102:96),(BYTE)(curve==TransferCurve::SRGB?87:132),(BYTE)(curve==TransferCurve::SRGB?77:24)};
+    const BYTE background[3] = {(BYTE)(original?102:96),(BYTE)(original?87:132),(BYTE)(original?77:24)};
     for(int y=0;y<size;++y)for(int x=0;x<size;++x){
         unsigned coverage=0;
         if(x>=left&&x<left+w&&y>=top&&y<top+h){
@@ -48,8 +48,13 @@ TrayRaster RasterizeTrayIcon(TransferCurve curve, int size) {
     SelectObject(dc,previousFont);DeleteObject(font);SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);
     return raster;
 }
-HICON MakeTrayIcon(TransferCurve curve,int size) {
-    auto raster=RasterizeTrayIcon(curve,size);
+TrayRaster RasterizeTrayIcon(TransferCurve curve,int size) {
+    if(!ValidCurve(curve))throw Error("Invalid tray icon parameters");
+    return RasterizeLabel(CurveLabel(curve),curve==TransferCurve::SRGB,size);
+}
+TrayRaster RasterizeSdrTrayIcon(int size) { return RasterizeLabel(L"SDR",true,size); }
+static HICON MakeIcon(const TrayRaster& raster) {
+    const int size=raster.size;
     BITMAPINFO info={};info.bmiHeader={sizeof(BITMAPINFOHEADER),size,-size,1,32,BI_RGB,0,0,0,0,0};
     void* raw=nullptr;HBITMAP color=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&raw,nullptr,0);
     HBITMAP mask=CreateBitmap(size,size,1,1,nullptr);
@@ -59,4 +64,6 @@ HICON MakeTrayIcon(TransferCurve curve,int size) {
     ICONINFO ii{TRUE,0,0,mask,color};HICON result=CreateIconIndirect(&ii);DeleteObject(mask);DeleteObject(color);
     if(!result)throw Error("Create tray icon failed");return result;
 }
+HICON MakeTrayIcon(TransferCurve curve,int size) { return MakeIcon(RasterizeTrayIcon(curve,size)); }
+HICON MakeSdrTrayIcon(int size) { return MakeIcon(RasterizeSdrTrayIcon(size)); }
 }

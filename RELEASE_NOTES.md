@@ -34,9 +34,9 @@ This repository-root file and its exact copy in `dev/` describe the current buil
 
   显示配置变化时暂停转换，待拓扑稳定后重新核对归属；目标暂时不可用时保留所选曲线，等待该目标恢复。
 
-- Show the active curve in the tray after an actual shader hit. Use a single native information box that refreshes for display changes. Automatic notifications and persistent runtime logs are disabled.
+- Show the active curve in the tray after an actual shader hit. While an HDR output is available, the original path and waiting states retain the gray `sRGB` icon. When all active outputs are in SDR mode, use a separate `SDR` icon with the same gray color scheme. State-change events notify the guardian and tray without waiting for periodic polling; composition-confirmed hits are published in the same worker iteration. Use a single native information box that refreshes for display changes. Automatic notifications and persistent runtime logs are disabled.
 
-  曲线实际命中后在托盘显示对应模式。原生说明窗口保持单实例，并随显示配置变化刷新；关闭自动通知和常驻运行日志。
+  曲线实际命中后在托盘显示对应模式。存在 HDR 输出时，原始路径或等待期间保留灰色 `sRGB` 图标；全部活动输出均处于 SDR 模式时显示独立的 `SDR` 图标，保持相同灰色配色。状态变化通过事件通知守护进程与托盘，无需等待定时轮询；合成刷新期间命中的曲线在同一轮处理中发布。原生说明窗口保持单实例，并随显示配置变化刷新；关闭自动通知和常驻运行日志。
 
 ### Recovery and maintenance / 恢复与维护
 
@@ -46,7 +46,7 @@ This repository-root file and its exact copy in `dev/` describe the current buil
 
 - Retry failed tray updates, recreate missing notification icons, and resync after display changes. Periodically refresh the icon so it recovers if Explorer loses an accepted update during HDR display reconnection.
 
-  托盘更新失败时自动重试，图标丢失时重新添加，并在显示配置变化后重新同步。定期刷新图标，避免 HDR 显示器重连时 Explorer 丢失已接受的更新，导致曲线生效后仍显示 sRGB。
+  托盘更新失败时自动重试，图标丢失时重新添加，并在显示配置变化后重新同步。定期刷新图标，避免 HDR 显示器重连时 Explorer 丢失已接受的更新，导致曲线生效后仍显示旧图标。
 
 - Request composition after curve changes and restoration using a temporary window, with bounded retries and no focus, DWM restart, or display-mode change. The window opts out of Shell fullscreen detection before display to avoid fullscreen notification suppression and taskbar restacking. Its minimum nonzero opacity may cause a very slight one-frame brightness change.
 

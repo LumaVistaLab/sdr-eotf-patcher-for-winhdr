@@ -17,6 +17,13 @@ ShaderFn shaderOriginal = nullptr;
 CommonFn commonOriginal = nullptr;
 BYTE* commonCache = nullptr;
 IsolationShared* volatile shared = nullptr;
+HANDLE stateChanged = nullptr;
+struct StateNotification {
+    Handle event;
+    explicit StateNotification(HANDLE value):event(value){stateChanged=value;}
+    ~StateNotification(){stateChanged=nullptr;}
+};
+void NotifyStateChanged() { if(stateChanged)SetEvent(stateChanged); }
 SRWLOCK contextLock = SRWLOCK_INIT, shaderLock = SRWLOCK_INIT;
 ULONG_PTR owners[MaxOutputs] = {};
 volatile LONG ownerSequence = -1, activeCalls = 0, agentRunning = 0;
@@ -57,10 +64,12 @@ Scope Identify(void* context, size_t offset) {
         InterlockedExchange(&s->stats.contextsMask,0); InterlockedExchange(&s->stats.mappingConflict,0);
     }
     if (owners[index] && owners[index] != (ULONG_PTR)context) {
-        InterlockedExchange(&s->stats.mappingConflict,1); InterlockedExchange(&s->enabled,0);
+        LONG conflict=InterlockedExchange(&s->stats.mappingConflict,1); InterlockedExchange(&s->enabled,0);
+        if(!conflict)NotifyStateChanged();
     } else {
-        owners[index] = (ULONG_PTR)context; InterlockedOr(&s->stats.contextsMask,1L << index);
+        owners[index] = (ULONG_PTR)context; LONG prior=InterlockedOr(&s->stats.contextsMask,1L << index);
         result.output = index; result.sequence = sequence; InterlockedIncrement64(&s->stats.frames[index]);
+        if(!(prior&(1L<<index)))NotifyStateChanged();
     }
     ReleaseSRWLockExclusive(&contextLock); return result;
 }
@@ -103,8 +112,9 @@ ID3D11PixelShader* SelectVariant(void* linked, ID3D11PixelShader* original, Isol
 void RecordReplacement(IsolationShared* s, int output, LONG sequence, TransferCurve curve, bool applied) {
     InterlockedIncrement64(&s->stats.replacements[output]);
     if (applied && (LONG)curve == InterlockedCompareExchange(&s->requestedCurve,0,0)) {
-        InterlockedExchange(&s->stats.appliedCurve,(LONG)curve);
-        InterlockedExchange(&s->stats.appliedSequence,sequence);
+        LONG priorCurve=InterlockedExchange(&s->stats.appliedCurve,(LONG)curve);
+        LONG priorSequence=InterlockedExchange(&s->stats.appliedSequence,sequence);
+        if(priorCurve!=(LONG)curve||priorSequence!=sequence)NotifyStateChanged();
     }
 }
 void* FindLinkedByShader(ID3D11PixelShader* shader) {
@@ -134,6 +144,7 @@ bool InspectCandidate(void* linked,ID3D11PixelShader* shader,TransferCurve curve
 }
 void SetMessage(IsolationShared* s, const wchar_t* message, LONG state) {
     wcsncpy_s(s->detail,message,_TRUNCATE); MemoryBarrier(); InterlockedExchange(&s->state,state);
+    NotifyStateChanged();
 }
 }
 extern "C" HRESULT DisplayRenderHook(void* self, void* frame) {
@@ -193,6 +204,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartIsolatedAgent(AgentStart* inc
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ|FILE_MAP_WRITE,FALSE,args.channel);
     auto s = (IsolationShared*)MapViewOfFile(mapping,FILE_MAP_READ|FILE_MAP_WRITE,0,0,sizeof(IsolationShared));
     if (!s || s->protocol != IsolationProtocol) { if (s) UnmapViewOfFile(s); CloseHandle(mapping); InterlockedExchange(&agentRunning,0); return 3; }
+    StateNotification notification(OpenEventW(EVENT_MODIFY_STATE,FALSE,IsolationStateEventName(args.channel).c_str()));
+    if(!notification.event.h){
+        SetMessage(s,L"无法打开隔离状态通知事件，未启用隔离",3);InterlockedExchange(&s->ready,1);
+        UnmapViewOfFile(s);CloseHandle(mapping);InterlockedExchange(&agentRunning,0);return 4;
+    }
     auto module = (BYTE*)GetModuleHandleW(L"dwmcore.dll");
     commonCache=module?module+CommonCacheRva:nullptr;
     const HookSite* sites[] = {&DisplayRenderSite,&LegacyRenderSite,&LinkedShaderSite,&CommonShaderSite};
@@ -276,6 +292,8 @@ __declspec(noinline) HRESULT TestRenderOriginal(void*, void*) {
 // ownership guard, original-shader lifetime and private-data variant cache in our own process.
 extern "C" __declspec(dllexport) DWORD WINAPI TestAgentHooks(const BYTE* data,size_t size) {
     try {
+        StateNotification notification(CreateEventW(nullptr,FALSE,FALSE,nullptr));
+        if(!notification.event.h)return 13;
         IsolationShared local={};local.protocol=IsolationProtocol;local.enabled=1;local.config.protocol=IsolationProtocol;local.config.count=3;
         local.config.outputs[0]={{0,0,2560,1440},{},0,TRUE,TRUE,L"HDR"};
         local.config.outputs[1]={{-1920,0,0,1080},{},1,FALSE,FALSE,L"SDR1"};
@@ -297,17 +315,25 @@ extern "C" __declspec(dllexport) DWORD WINAPI TestAgentHooks(const BYTE* data,si
         std::vector<BYTE> contexts[3];for(unsigned i=0;i<3;++i){contexts[i].resize(0x7800);auto r=local.config.outputs[i].bounds;float b[4]={(float)r.left,(float)r.top,(float)r.right,(float)r.bottom};memcpy(contexts[i].data()+DisplayRectOffset,b,sizeof(b));}
         RenderFn volatile render=TestRenderOriginal;
         for(unsigned frame=0;frame<2;++frame)for(unsigned i=0;i<3;++i)render(contexts[i].data(),nullptr);
+        if(WaitForSingleObject(notification.event,0)!=WAIT_OBJECT_0)return 14;
+        for(unsigned i=0;i<3;++i)render(contexts[i].data(),nullptr);
+        if(WaitForSingleObject(notification.event,0)!=WAIT_TIMEOUT)return 15;
         auto next=initial;next.curve=TransferCurve::Gamma24;UpdateIsolationConfig(local,next);
         // Hold the creation lock to emulate another render thread preparing the new curve.
         testFallback=TransferCurve::Gamma22;AcquireSRWLockExclusive(&shaderLock);
         render(contexts[0].data(),nullptr);ReleaseSRWLockExclusive(&shaderLock);testFallback=TransferCurve::SRGB;
         if(testFailed||AppliedIsolationCurve(local)!=TransferCurve::Gamma22)return 10;
+        if(WaitForSingleObject(notification.event,0)!=WAIT_TIMEOUT)return 16;
         render(contexts[0].data(),nullptr);
         if(testFailed||AppliedIsolationCurve(local)!=TransferCurve::Gamma24)return 11;
+        if(WaitForSingleObject(notification.event,0)!=WAIT_OBJECT_0)return 17;
         for(int mode:{0,1,2,0,3,2,1,0}){
+            auto prior=AppliedIsolationCurve(local);
             LONG sequence=local.configSequence;next.curve=(TransferCurve)mode;UpdateIsolationConfig(local,next);
             if(local.configSequence!=sequence||local.stats.contextsMask!=7||!local.enabled)return 12;
             for(unsigned frame=0;frame<20;++frame)for(unsigned i=0;i<3;++i)render(contexts[i].data(),nullptr);
+            bool changed=mode!=(int)TransferCurve::SRGB&&mode!=(int)prior;
+            if(WaitForSingleObject(notification.event,0)!=(changed?WAIT_OBJECT_0:WAIT_TIMEOUT))return 18;
         }
         if(local.stats.variants!=3||!testVariants[0]||!testVariants[1]||!testVariants[2]||testVariants[0]==testVariants[1]||testVariants[0]==testVariants[2]||testVariants[1]==testVariants[2])return 8;
         if(testFailed||!local.stats.replacements[0]||local.stats.replacements[1]||local.stats.replacements[2]||!local.stats.sdrBypasses[1]||!local.stats.sdrBypasses[2])return 4;
