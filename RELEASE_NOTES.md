@@ -2,12 +2,12 @@
 
 ## Applicable binary / 适用的二进制
 
-Target binary / 目标二进制: `dwmcore.dll` `10.0.26100.8875` (Windows x64).
+Target binary / 目标二进制: `dwmcore.dll` `10.0.26100.9949` (Windows x64).
 
 SHA-256:
 
 ```text
-825726F26BD6B5A02B49F6145963B54D537D3D1239055DDA28D1FB0B3E864EF3
+A3C7441A4B53A302F836A3B9B04EFA343E320E2D0CFFCE730601F89689FB7B48
 ```
 
 Only this exact binary is supported. The file digest and hook entry bytes must match the built-in isolation profile.
@@ -80,9 +80,9 @@ This repository-root file and its exact copy in `dev/` describe the current buil
 
 ### Compatibility and limitations / 兼容条件与限制
 
-- Require Windows x64 and the exact `dwmcore.dll` profile for version `10.0.26100.8875`. A file digest or hook entry mismatch prevents activation.
+- Require Windows x64 and the exact `dwmcore.dll` profile for version `10.0.26100.9949`. A file digest or hook entry mismatch prevents activation.
 
-  需要 Windows x64，且 `dwmcore.dll` 必须精确匹配 `10.0.26100.8875` 的内置配置；文件摘要或挂钩入口字节不匹配时不启用。
+  需要 Windows x64，且 `dwmcore.dll` 必须精确匹配 `10.0.26100.9949` 的内置配置；文件摘要或挂钩入口字节不匹配时不启用。
 
 - Support up to 8 active outputs, identified by display rectangles including desktop origins. Unknown or conflicting contexts keep the original shader.
 

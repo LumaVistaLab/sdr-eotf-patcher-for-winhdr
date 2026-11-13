@@ -14,10 +14,10 @@ Release notes: [English / 简体中文](RELEASE_NOTES.md).
 - The installed `dwmcore.dll` must exactly match the built-in isolation profile. A file digest or hook entry mismatch prevents activation.
 - Up to 8 active outputs are supported. Each output must be uniquely identifiable by its display rectangle, including its desktop origin. Ambiguous ownership or conflicting contexts keep the original path.
 
-The supported module version is `10.0.26100.8875`, with SHA256:
+The supported module version is `10.0.26100.9949`, with SHA256:
 
 ```text
-825726F26BD6B5A02B49F6145963B54D537D3D1239055DDA28D1FB0B3E864EF3
+A3C7441A4B53A302F836A3B9B04EFA343E320E2D0CFFCE730601F89689FB7B48
 ```
 
 Check module compatibility again after Windows updates. Changing only the version number, digest, or offsets is insufficient to support another module.
